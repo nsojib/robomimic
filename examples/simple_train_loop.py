@@ -37,13 +37,11 @@ def get_data_loader(dataset_path):
             "robot0_gripper_qpos", 
             "object",
         ),
-        action_keys=("actions",),       # actions we want to appear in batches
         dataset_keys=(                  # can optionally specify more keys here if they should appear in batches
             "actions", 
             "rewards", 
             "dones",
         ),
-        action_config={"actions": {}},  # use default action config
         load_next_obs=True,
         frame_stack=1,
         seq_length=10,                  # length-10 temporal sequences
@@ -79,17 +77,13 @@ def get_example_model(dataset_path, device):
     # default BC config
     config = config_factory(algo_name="bc")
 
-    # override dataset path in config
-    config.train.data = [{"path": dataset_path}]
-
-    # read config to set up metadata for observation modalities (e.g. detecting rgb observations)
+    # read config to set up metadata for observation types (e.g. detecting image observations)
     ObsUtils.initialize_obs_utils_with_config(config)
 
     # read dataset to get some metadata for constructing model
     shape_meta = FileUtils.get_shape_metadata_from_dataset(
-        dataset_config=config.train.data[0], 
-        action_keys=config.train.action_keys,
-        all_obs_keys=sorted((
+        dataset_path=dataset_path, 
+        all_modalities=sorted((
             "robot0_eef_pos", 
             "robot0_eef_quat", 
             "robot0_gripper_qpos", 
@@ -101,7 +95,7 @@ def get_example_model(dataset_path, device):
     model = algo_factory(
         algo_name=config.algo_name,
         config=config,
-        obs_key_shapes=shape_meta["all_shapes"],
+        modality_shapes=shape_meta["all_shapes"],
         ac_dim=shape_meta["ac_dim"],
         device=device,
     )
@@ -113,8 +107,8 @@ def print_batch_info(batch):
     for k in batch:
         if k in ["obs", "next_obs"]:
             print("key {}".format(k))
-            for obs_key in batch[k]:
-                print("    obs key {} with shape {}".format(obs_key, batch[k][obs_key].shape))
+            for mod in batch[k]:
+                print("    modality {} with shape {}".format(mod, batch[k][mod].shape))
         else:
             print("key {} with shape {}".format(k, batch[k].shape))
     print("")
@@ -161,7 +155,6 @@ def run_train_loop(model, data_loader):
 
             # process batch for training
             input_batch = model.process_batch_for_training(batch)
-            input_batch = model.postprocess_batch_for_training(input_batch, obs_normalization_stats=None)
 
             # forward and backward pass
             info = model.train_on_batch(batch=input_batch, epoch=epoch, validate=False)

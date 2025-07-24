@@ -48,11 +48,26 @@ import argparse
 
 import robomimic
 import robomimic.utils.file_utils as FileUtils
-from robomimic import DATASET_REGISTRY, HF_REPO_ID
+from robomimic import DATASET_REGISTRY
 
 ALL_TASKS = ["lift", "can", "square", "transport", "tool_hang", "lift_real", "can_real", "tool_hang_real"]
 ALL_DATASET_TYPES = ["ph", "mh", "mg", "paired"]
 ALL_HDF5_TYPES = ["raw", "low_dim", "image", "low_dim_sparse", "low_dim_dense", "image_sparse", "image_dense"]
+
+
+def make_dataset_dirs(base_dir):
+    """
+    Create directory structure for all datasets. The datasets are organized into 
+    subfolders by task (e.g. lift, can, square, transport, tool hang) and dataset types 
+    (e.g. mg (machine generated), ph (proficient human), mh (multi-human)).
+
+    Args:
+        base_dir (str): base dataset directory where all subfolders should be created
+    """
+    for task in DATASET_REGISTRY:
+        for dataset_type in DATASET_REGISTRY[task]:
+            dataset_dir = os.path.join(base_dir, task, dataset_type)
+            os.makedirs(dataset_dir, exist_ok=True)
 
 
 if __name__ == "__main__":
@@ -93,7 +108,7 @@ if __name__ == "__main__":
         type=str,
         nargs='+',
         default=["low_dim"],
-        help="hdf5 types to download datasets for (e.g. raw, low_dim, image). Defaults to raw. Pass 'all' \
+        help="hdf5 types to download datasets for (e.g. raw, low_dim, image). Defaults to low_dim. Pass 'all' \
             to download datasets for all available hdf5 types per task and dataset, or directly specify the list\
             of hdf5 types.",
     )
@@ -107,10 +122,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # set default base directory for downloads
+    # make directory structure
     default_base_dir = args.download_dir
     if default_base_dir is None:
         default_base_dir = os.path.join(robomimic.__path__[0], "../datasets")
+    make_dataset_dirs(base_dir=default_base_dir)
 
     # load args
     download_tasks = args.tasks
@@ -144,30 +160,11 @@ if __name__ == "__main__":
                             download_dir = os.path.abspath(os.path.join(default_base_dir, task, dataset_type))
                             print("\nDownloading dataset:\n    task: {}\n    dataset type: {}\n    hdf5 type: {}\n    download path: {}"
                                 .format(task, dataset_type, hdf5_type, download_dir))
-                            url = DATASET_REGISTRY[task][dataset_type][hdf5_type]["url"]
-                            if url is None:
-                                print(
-                                    "Skipping {}-{}-{}, no url for dataset exists.".format(task, dataset_type, hdf5_type)
-                                    + " Create this dataset locally by running the appropriate command from robomimic/scripts/extract_obs_from_raw_datasets.sh."
-                                )
-                                continue
                             if args.dry_run:
                                 print("\ndry run: skip download")
                             else:
-                                # Make sure path exists and create if it doesn't
-                                os.makedirs(download_dir, exist_ok=True)
-                                if "real" in task:
-                                    # real world datasets are still hosted at Stanford
-                                    FileUtils.download_url(
-                                        url=DATASET_REGISTRY[task][dataset_type][hdf5_type]["url"], 
-                                        download_dir=download_dir,
-                                    )
-                                else:
-                                    # sim datasets are hosted on HF
-                                    FileUtils.download_file_from_hf(
-                                        repo_id=HF_REPO_ID,
-                                        filename=DATASET_REGISTRY[task][dataset_type][hdf5_type]["url"],
-                                        download_dir=download_dir,
-                                        check_overwrite=True,
-                                    )
+                                FileUtils.download_url(
+                                    url=DATASET_REGISTRY[task][dataset_type][hdf5_type]["url"], 
+                                    download_dir=download_dir,
+                                )
                             print("")

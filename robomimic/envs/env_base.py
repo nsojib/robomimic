@@ -13,7 +13,6 @@ class EnvType:
     """
     ROBOSUITE_TYPE = 1
     GYM_TYPE = 2
-    IG_MOMART_TYPE = 3
 
 
 class EnvBase(abc.ABC):
@@ -25,7 +24,7 @@ class EnvBase(abc.ABC):
         render=False, 
         render_offscreen=False, 
         use_image_obs=False, 
-        use_depth_obs=False, 
+        postprocess_visual_obs=True, 
         **kwargs,
     ):
         """
@@ -42,9 +41,9 @@ class EnvBase(abc.ABC):
                 on every env.step call. Set this to False for efficiency reasons, if image
                 observations are not required.
 
-            use_depth_obs (bool): if True, environment is expected to render depth image observations
-                on every env.step call. Set this to False for efficiency reasons, if depth
-                observations are not required.
+            postprocess_visual_obs (bool): if True, postprocess image observations
+                to prepare for learning. This should only be False when extracting observations
+                for saving to a dataset (to save space on RGB images for example).
         """
         return
 
@@ -164,14 +163,6 @@ class EnvBase(abc.ABC):
         """
         return
 
-    @property
-    def version(self):
-        """
-        Returns version of environment (str).
-        This is not an abstract method, some subclasses do not implement it
-        """
-        return None
-
     @abc.abstractmethod
     def serialize(self):
         """
@@ -183,18 +174,7 @@ class EnvBase(abc.ABC):
 
     @classmethod
     @abc.abstractmethod
-    def create_for_data_processing(
-        cls, 
-        camera_names, 
-        camera_height, 
-        camera_width, 
-        reward_shaping, 
-        render=None, 
-        render_offscreen=None, 
-        use_image_obs=None, 
-        use_depth_obs=None, 
-        **kwargs,
-    ):
+    def create_for_data_processing(cls, camera_names, camera_height, camera_width, reward_shaping, **kwargs):
         """
         Create environment for processing datasets, which includes extracting
         observations, labeling dense / sparse rewards, and annotating dones in
@@ -205,12 +185,6 @@ class EnvBase(abc.ABC):
             camera_height (int): camera height for all cameras
             camera_width (int): camera width for all cameras
             reward_shaping (bool): if True, use shaped environment rewards, else use sparse task completion rewards
-            render (bool or None): optionally override rendering behavior. Defaults to False.
-            render_offscreen (bool or None): optionally override rendering behavior. The default value is True if
-                @camera_names is non-empty, False otherwise.
-            use_image_obs (bool or None): optionally override rendering behavior. The default value is True if
-                @camera_names is non-empty, False otherwise.
-            use_depth_obs (bool): if True, use depth observations
 
         Returns:
             env (EnvBase instance)
@@ -226,11 +200,4 @@ class EnvBase(abc.ABC):
         simulation computations.
         """
         return
-
-    @property
-    @abc.abstractmethod
-    def base_env(self):
-        """
-        Grabs base simulation environment.
-        """
-        return
+    

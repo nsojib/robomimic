@@ -5,7 +5,6 @@ in dataset files.
 """
 from copy import deepcopy
 import robomimic.envs.env_base as EB
-from robomimic.utils.log_utils import log_warning
 
 
 def get_env_class(env_meta=None, env_type=None, env=None):
@@ -38,9 +37,6 @@ def get_env_class(env_meta=None, env_type=None, env=None):
     elif env_type == EB.EnvType.GYM_TYPE:
         from robomimic.envs.env_gym import EnvGym
         return EnvGym
-    elif env_type == EB.EnvType.IG_MOMART_TYPE:
-        from robomimic.envs.env_ig_momart import EnvGibsonMOMART
-        return EnvGibsonMOMART
     raise Exception("code should never reach this point")
 
 
@@ -96,39 +92,6 @@ def check_env_type(type_to_check, env_meta=None, env_type=None, env=None):
     return (env_type == type_to_check)
 
 
-def check_env_version(env, env_meta):
-    """
-    Checks whether the passed env and env_meta dictionary having matching environment versions.
-    Logs warning if cannot find version or versions do not match.
-
-    Args:
-        env (instance of EB.EnvBase): environment instance
-
-        env_meta (dict): environment metadata, which should be loaded from demonstration
-            hdf5 with @FileUtils.get_env_metadata_from_dataset or from checkpoint (see
-            @FileUtils.env_from_checkpoint). Contains following key:
-
-                :`'env_version'`: environment version, type str
-    """
-    env_system_version = env.version
-    env_meta_version = env_meta.get("env_version", None)
-
-    if env_meta_version is None:
-        log_warning(
-            "No environment version found in dataset!"\
-            "\nCannot verify if dataset and installed environment versions match"\
-        )
-    elif env_system_version != env_meta_version:
-        log_warning(
-            "Dataset and installed environment version mismatch!"\
-            "\nDataset environment version: {meta}"\
-            "\nInstalled environment version: {sys}".format(
-                sys=env_system_version,
-                meta=env_meta_version,
-            )
-        )
-
-
 def is_robosuite_env(env_meta=None, env_type=None, env=None):
     """
     Determines whether the environment is a robosuite environment. Accepts
@@ -143,8 +106,6 @@ def create_env(
     render=False, 
     render_offscreen=False, 
     use_image_obs=False, 
-    use_depth_obs=False, 
-    lang=None,
     **kwargs,
 ):
     """
@@ -164,22 +125,16 @@ def create_env(
         use_image_obs (bool): if True, environment is expected to render rgb image observations
             on every env.step call. Set this to False for efficiency reasons, if image
             observations are not required.
-
-        use_depth_obs (bool): if True, environment is expected to render depth image observations
-            on every env.step call. Set this to False for efficiency reasons, if depth
-            observations are not required.
-
-        lang: language instruction for the environment
     """
 
+    # note: pass @postprocess_visual_obs True, to make sure images are processed for network inputs
     env_class = get_env_class(env_type=env_type)
     env = env_class(
         env_name=env_name, 
         render=render, 
         render_offscreen=render_offscreen, 
         use_image_obs=use_image_obs,
-        use_depth_obs=use_depth_obs,
-        lang=lang,
+        postprocess_visual_obs=True,
         **kwargs,
     )
     print("Created environment with name {}".format(env_name))
@@ -193,7 +148,6 @@ def create_env_from_metadata(
     render=False, 
     render_offscreen=False, 
     use_image_obs=False, 
-    use_depth_obs=False, 
 ):
     """
     Create environment.
@@ -218,28 +172,20 @@ def create_env_from_metadata(
         use_image_obs (bool): if True, environment is expected to render rgb image observations
             on every env.step call. Set this to False for efficiency reasons, if image
             observations are not required.
-
-        use_depth_obs (bool): if True, environment is expected to render depth image observations
-            on every env.step call. Set this to False for efficiency reasons, if depth
-            observations are not required.
     """
     if env_name is None:
         env_name = env_meta["env_name"]
     env_type = get_env_type(env_meta=env_meta)
     env_kwargs = env_meta["env_kwargs"]
-    env_kwargs["env_name"] = env_name
-    lang = env_meta.get("lang", None)
 
     env = create_env(
         env_type=env_type,
+        env_name=env_name,  
         render=render, 
         render_offscreen=render_offscreen, 
         use_image_obs=use_image_obs, 
-        use_depth_obs=use_depth_obs, 
-        lang=lang,
         **env_kwargs,
     )
-    check_env_version(env, env_meta)
     return env
 
 
@@ -249,11 +195,6 @@ def create_env_for_data_processing(
     camera_height, 
     camera_width, 
     reward_shaping,
-    env_class=None,
-    render=None, 
-    render_offscreen=None, 
-    use_image_obs=None, 
-    use_depth_obs=None, 
 ):
     """
     Creates environment for processing dataset observations and rewards.
@@ -274,20 +215,11 @@ def create_env_for_data_processing(
         camera_width (int): camera width for all cameras
 
         reward_shaping (bool): if True, use shaped environment rewards, else use sparse task completion rewards
-
-        render (bool or None): optionally override rendering behavior
-
-        render_offscreen (bool or None): optionally override rendering behavior
-
-        use_image_obs (bool or None): optionally override rendering behavior
-
-        use_depth_obs (bool or None): optionally override rendering behavior
     """
     env_name = env_meta["env_name"]
     env_type = get_env_type(env_meta=env_meta)
     env_kwargs = env_meta["env_kwargs"]
-    if env_class is None:
-        env_class = get_env_class(env_type=env_type)
+    env_class = get_env_class(env_type=env_type)
 
     # remove possibly redundant values in kwargs
     env_kwargs = deepcopy(env_kwargs)
@@ -296,50 +228,12 @@ def create_env_for_data_processing(
     env_kwargs.pop("camera_height", None)
     env_kwargs.pop("camera_width", None)
     env_kwargs.pop("reward_shaping", None)
-    env_kwargs.pop("render", None)
-    env_kwargs.pop("render_offscreen", None)
-    env_kwargs.pop("use_image_obs", None)
-    env_kwargs.pop("use_depth_obs", None)
 
-    env = env_class.create_for_data_processing(
+    return env_class.create_for_data_processing(
         env_name=env_name, 
         camera_names=camera_names, 
         camera_height=camera_height, 
         camera_width=camera_width, 
         reward_shaping=reward_shaping, 
-        render=render, 
-        render_offscreen=render_offscreen, 
-        use_image_obs=use_image_obs, 
-        use_depth_obs=use_depth_obs,
         **env_kwargs,
     )
-    check_env_version(env, env_meta)
-    return env
-
-
-def set_env_specific_obs_processing(env_meta=None, env_type=None, env=None):
-    """
-    Sets env-specific observation processing. As an example, robosuite depth observations
-    correspond to raw depth and should not be normalized by default, while default depth
-    processing normalizes and clips all values to [0, 1].
-    """
-    if is_robosuite_env(env_meta=env_meta, env_type=env_type, env=env):
-        from robomimic.utils.obs_utils import DepthModality, process_frame, unprocess_frame
-        DepthModality.set_obs_processor(processor=(
-            lambda obs: process_frame(frame=obs, channel_dim=1, scale=None)
-        ))
-        DepthModality.set_obs_unprocessor(unprocessor=(
-            lambda obs: unprocess_frame(frame=obs, channel_dim=1, scale=None)
-        ))
-
-
-def wrap_env_from_config(env, config):
-    """
-    Wraps environment using the provided Config object to determine which wrappers
-    to use (if any).
-    """
-    if ("frame_stack" in config.train) and (config.train.frame_stack > 1):
-        from robomimic.envs.wrappers import FrameStackWrapper
-        env = FrameStackWrapper(env, num_frames=config.train.frame_stack)
-
-    return env

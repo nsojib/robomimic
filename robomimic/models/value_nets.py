@@ -27,12 +27,18 @@ class ValueNetwork(MIMO_MLP):
         obs_shapes,
         mlp_layer_dims,
         value_bounds=None,
+        visual_feature_dimension=64,
+        visual_core_class='ResNet18Conv',
+        visual_core_kwargs=None,
+        obs_randomizer_class=None,
+        obs_randomizer_kwargs=None,
+        use_spatial_softmax=False,
+        spatial_softmax_kwargs=None,
         goal_shapes=None,
-        encoder_kwargs=None,
     ):
         """
         Args:
-            obs_shapes (OrderedDict): a dictionary that maps observation keys to
+            obs_shapes (OrderedDict): a dictionary that maps modality to
                 expected shapes for observations.
 
             mlp_layer_dims ([int]): sequence of integers for the MLP hidden layers sizes. 
@@ -41,25 +47,24 @@ class ValueNetwork(MIMO_MLP):
                 that the network should be possible of generating. The network will rescale outputs
                 using a tanh layer to lie within these bounds. If None, no tanh re-scaling is done.
 
-            goal_shapes (OrderedDict): a dictionary that maps observation keys to
+            visual_feature_dimension (int): feature dimension to encode images into. 
+
+            visual_core_class (str): specifies Visual Backbone network for encoding images.
+
+            visual_core_kwargs (dict): arguments to pass to @visual_core_class. 
+
+            obs_randomizer_class (str): specifies a Randomizer class for the input modality
+
+            obs_randomizer_kwargs (dict): kwargs for the observation randomizer
+
+            use_spatial_softmax (bool): if True, introduce a spatial softmax layer at
+                the end of the visual backbone network, resulting in a sharp bottleneck
+                representation for visual inputs.
+
+            spatial_softmax_kwargs (dict): arguments to pass to spatial softmax layer.
+
+            goal_shapes (OrderedDict): a dictionary that maps modality to
                 expected shapes for goal observations.
-
-            encoder_kwargs (dict or None): If None, results in default encoder_kwargs being applied. Otherwise, should
-                be nested dictionary containing relevant per-observation key information for encoder networks.
-                Should be of form:
-
-                obs_modality1: dict
-                    feature_dimension: int
-                    core_class: str
-                    core_kwargs: dict
-                        ...
-                        ...
-                    obs_randomizer_class: str
-                    obs_randomizer_kwargs: dict
-                        ...
-                        ...
-                obs_modality2: dict
-                    ...
         """
         self.value_bounds = value_bounds
         if self.value_bounds is not None:
@@ -88,7 +93,13 @@ class ValueNetwork(MIMO_MLP):
             input_obs_group_shapes=observation_group_shapes,
             output_shapes=output_shapes,
             layer_dims=mlp_layer_dims,
-            encoder_kwargs=encoder_kwargs,
+            visual_feature_dimension=visual_feature_dimension,
+            visual_core_class=visual_core_class,
+            visual_core_kwargs=visual_core_kwargs,
+            obs_randomizer_class=obs_randomizer_class,
+            obs_randomizer_kwargs=obs_randomizer_kwargs,
+            use_spatial_softmax=use_spatial_softmax,
+            spatial_softmax_kwargs=spatial_softmax_kwargs, 
         )
 
     def _get_output_shapes(self):
@@ -137,12 +148,18 @@ class ActionValueNetwork(ValueNetwork):
         ac_dim,
         mlp_layer_dims,
         value_bounds=None,
+        visual_feature_dimension=64,
+        visual_core_class='ResNet18Conv',
+        visual_core_kwargs=None,
+        obs_randomizer_class=None,
+        obs_randomizer_kwargs=None,
+        use_spatial_softmax=False,
+        spatial_softmax_kwargs=None,
         goal_shapes=None,
-        encoder_kwargs=None,
     ):
         """
         Args:
-            obs_shapes (OrderedDict): a dictionary that maps observation keys to
+            obs_shapes (OrderedDict): a dictionary that maps modality to
                 expected shapes for observations.
 
             ac_dim (int): dimension of action space.
@@ -153,25 +170,24 @@ class ActionValueNetwork(ValueNetwork):
                 that the network should be possible of generating. The network will rescale outputs
                 using a tanh layer to lie within these bounds. If None, no tanh re-scaling is done.
 
-            goal_shapes (OrderedDict): a dictionary that maps observation keys to
+            visual_feature_dimension (int): feature dimension to encode images into. 
+
+            visual_core_class (str): specifies Visual Backbone network for encoding images.
+
+            visual_core_kwargs (dict): arguments to pass to @visual_core_class. 
+
+            obs_randomizer_class (str): specifies a Randomizer class for the input modality
+
+            obs_randomizer_kwargs (dict): kwargs for the observation randomizer
+
+            use_spatial_softmax (bool): if True, introduce a spatial softmax layer at
+                the end of the visual backbone network, resulting in a sharp bottleneck
+                representation for visual inputs.
+
+            spatial_softmax_kwargs (dict): arguments to pass to spatial softmax layer.
+
+            goal_shapes (OrderedDict): a dictionary that maps modality to
                 expected shapes for goal observations.
-
-            encoder_kwargs (dict or None): If None, results in default encoder_kwargs being applied. Otherwise, should
-                be nested dictionary containing relevant per-observation key information for encoder networks.
-                Should be of form:
-
-                obs_modality1: dict
-                    feature_dimension: int
-                    core_class: str
-                    core_kwargs: dict
-                        ...
-                        ...
-                    obs_randomizer_class: str
-                    obs_randomizer_kwargs: dict
-                        ...
-                        ...
-                obs_modality2: dict
-                    ...
         """
 
         # add in action as a modality
@@ -184,8 +200,14 @@ class ActionValueNetwork(ValueNetwork):
             obs_shapes=new_obs_shapes,
             mlp_layer_dims=mlp_layer_dims,
             value_bounds=value_bounds,
+            visual_feature_dimension=visual_feature_dimension,
+            visual_core_class=visual_core_class,
+            visual_core_kwargs=visual_core_kwargs,
+            obs_randomizer_class=obs_randomizer_class,
+            obs_randomizer_kwargs=obs_randomizer_kwargs,
+            use_spatial_softmax=use_spatial_softmax,
+            spatial_softmax_kwargs=spatial_softmax_kwargs,
             goal_shapes=goal_shapes,
-            encoder_kwargs=encoder_kwargs,
         )
 
     def forward(self, obs_dict, acts, goal_dict=None):
@@ -213,8 +235,14 @@ class DistributionalActionValueNetwork(ActionValueNetwork):
         mlp_layer_dims,
         value_bounds,
         num_atoms,
+        visual_feature_dimension=64,
+        visual_core_class='ResNet18Conv',
+        visual_core_kwargs=None,
+        obs_randomizer_class=None,
+        obs_randomizer_kwargs=None,
+        use_spatial_softmax=False,
+        spatial_softmax_kwargs=None,
         goal_shapes=None,
-        encoder_kwargs=None,
     ):
         """
         Args:
@@ -232,25 +260,24 @@ class DistributionalActionValueNetwork(ActionValueNetwork):
             num_atoms (int): number of value atoms to use for the categorical distribution - which
                 is the representation of the value distribution.
 
+            visual_feature_dimension (int): feature dimension to encode images into. 
+
+            visual_core_class (str): specifies Visual Backbone network for encoding images.
+
+            visual_core_kwargs (dict): arguments to pass to @visual_core_class. 
+
+            obs_randomizer_class (str): specifies a Randomizer class for the input modality
+
+            obs_randomizer_kwargs (dict): kwargs for the observation randomizer
+
+            use_spatial_softmax (bool): if True, introduce a spatial softmax layer at
+                the end of the visual backbone network, resulting in a sharp bottleneck
+                representation for visual inputs.
+
+            spatial_softmax_kwargs (dict): arguments to pass to spatial softmax layer.
+
             goal_shapes (OrderedDict): a dictionary that maps modality to
                 expected shapes for goal observations.
-
-            encoder_kwargs (dict or None): If None, results in default encoder_kwargs being applied. Otherwise, should
-                be nested dictionary containing relevant per-modality information for encoder networks.
-                Should be of form:
-
-                obs_modality1: dict
-                    feature_dimension: int
-                    core_class: str
-                    core_kwargs: dict
-                        ...
-                        ...
-                    obs_randomizer_class: str
-                    obs_randomizer_kwargs: dict
-                        ...
-                        ...
-                obs_modality2: dict
-                    ...
         """
 
         # parameters specific to DistributionalActionValueNetwork
@@ -263,8 +290,13 @@ class DistributionalActionValueNetwork(ActionValueNetwork):
             ac_dim=ac_dim,
             mlp_layer_dims=mlp_layer_dims,
             value_bounds=value_bounds,
+            visual_feature_dimension=visual_feature_dimension,
+            visual_core_class=visual_core_class,
+            visual_core_kwargs=visual_core_kwargs,
+            obs_randomizer_kwargs=obs_randomizer_kwargs,
+            use_spatial_softmax=use_spatial_softmax,
+            spatial_softmax_kwargs=spatial_softmax_kwargs,
             goal_shapes=goal_shapes,
-            encoder_kwargs=encoder_kwargs,
         )
 
     def _get_output_shapes(self):

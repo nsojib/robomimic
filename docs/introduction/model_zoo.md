@@ -1,27 +1,8 @@
-# robomimic-v0.1
+# Using the Model Zoo
 
-We provide links below to several pretrained models that were trained with robomimic-v0.1 for our CoRL 2021 study. All success rates listed below are approximate - they may vary.
+This section provides several proficient trained policy models that can be downloaded and used as-is. See the ["Evaluating Trained Policies"](./quickstart.html#evaluating-trained-policies) section for instructions on loading these agents. The model zoo will be updated over time to include more tasks and policies. All success rates listed below are approximate - they may vary.
 
-<div class="admonition note">
-<p class="admonition-title">Note: see tutorial on using these models</p>
-
-See the ["Using Pretrained Models"](../tutorials/using_pretrained_models.html) tutorial for instructions on using these models.
-
-</div>
-
-<div class="admonition warning">
-<p class="admonition-title">Warning: use correct robomimic and robosuite versions!</p>
-
-When using these trained models, please make sure that robosuite is on the [`offline_study` branch](https://github.com/ARISE-Initiative/robosuite/tree/offline_study), and that robomimic is on the [`v0.1` branch](https://github.com/ARISE-Initiative/robomimic/tree/v0.1).
-
-</div>
-
-<div class="admonition note">
-<p class="admonition-title">Troubleshooting download issues</p>
-
-Some users (eg. using Chrome) may experience issues with the dataset download links. If you are experiencing these issues, follow these steps: (1) right click on the download link, (2) select the option to copy the linked url, and (3) copy paste the link in a new tab.
-
-</div>
+**Warning:** When using these trained models, please make sure that robosuite is on the `offline_study` branch of robosuite.
 
 ## Proficient-Human (PH)
 

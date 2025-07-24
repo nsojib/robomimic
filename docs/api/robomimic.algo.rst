@@ -36,14 +36,6 @@ robomimic.algo.cql module
    :undoc-members:
    :show-inheritance:
 
-robomimic.algo.diffusion\_policy module
----------------------------------------
-
-.. automodule:: robomimic.algo.diffusion_policy
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 robomimic.algo.gl module
 ------------------------
 
@@ -56,14 +48,6 @@ robomimic.algo.hbc module
 -------------------------
 
 .. automodule:: robomimic.algo.hbc
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-robomimic.algo.iql module
--------------------------
-
-.. automodule:: robomimic.algo.iql
    :members:
    :undoc-members:
    :show-inheritance:

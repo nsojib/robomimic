@@ -67,23 +67,18 @@ class GLConfig(BaseConfig):
             "robot0_gripper_qpos", 
             "object",
         ]
-        self.observation.modalities.subgoal.rgb = []                      # specify rgb image subgoal observations for agent to predict
-        self.observation.modalities.subgoal.depth = []
-        self.observation.modalities.subgoal.scan = []
-        self.observation.modalities.subgoal.do_not_lock_keys()
+        self.observation.modalities.subgoal.image = []                      # specify image subgoal observations for agent to predict
 
     @property
-    def all_obs_keys(self):
+    def all_modalities(self):
         """
         Update from superclass to include subgoals.
         """
-        # pool all modalities
-        return sorted(tuple(set([
-            obs_key for group in [
-                self.observation.modalities.obs.values(),
-                self.observation.modalities.goal.values(),
-                self.observation.modalities.subgoal.values(),
-            ]
-            for modality in group
-            for obs_key in modality
-        ])))
+        return sorted(tuple(set(
+            self.observation.modalities.obs.low_dim + 
+            self.observation.modalities.obs.image +
+            self.observation.modalities.subgoal.low_dim + 
+            self.observation.modalities.subgoal.image + 
+            self.observation.modalities.goal.low_dim + 
+            self.observation.modalities.goal.image
+        )))

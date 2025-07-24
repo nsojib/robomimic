@@ -43,7 +43,7 @@ class GL(PlannerAlgo):
         algo_config,
         obs_config,
         global_config,
-        obs_key_shapes,
+        modality_shapes,
         ac_dim,
         device
     ):
@@ -57,7 +57,7 @@ class GL(PlannerAlgo):
 
             global_config (Config object): global training config
 
-            obs_key_shapes (OrderedDict): dictionary that maps observation keys to shapes
+            modality_shapes (OrderedDict): dictionary that maps modality keys to shapes
 
             ac_dim (int): dimension of action space
 
@@ -69,7 +69,7 @@ class GL(PlannerAlgo):
             algo_config=algo_config,
             obs_config=obs_config,
             global_config=global_config,
-            obs_key_shapes=obs_key_shapes,
+            modality_shapes=modality_shapes,
             ac_dim=ac_dim,
             device=device
         )
@@ -90,7 +90,7 @@ class GL(PlannerAlgo):
             input_obs_group_shapes=obs_group_shapes, 
             output_shapes=self.subgoal_shapes,
             layer_dims=self.algo_config.ae.planner_layer_dims,
-            encoder_kwargs=ObsUtils.obs_encoder_kwargs_from_config(self.obs_config.encoder),
+            **ObsNets.obs_encoder_args_from_config(self.obs_config.encoder),
         )
 
         self.nets = self.nets.float().to(self.device)
@@ -117,9 +117,7 @@ class GL(PlannerAlgo):
         input_batch["target_subgoals"] = input_batch["subgoals"]
         input_batch["goal_obs"] = batch.get("goal_obs", None) # goals may not be present
 
-        # we move to device first before float conversion because image observation modalities will be uint8 -
-        # this minimizes the amount of data transferred to GPU
-        return TensorUtils.to_float(TensorUtils.to_device(input_batch, self.device))
+        return TensorUtils.to_device(TensorUtils.to_float(input_batch), self.device)
 
     def get_actor_goal_for_training_from_processed_batch(self, processed_batch, **kwargs):
         """
@@ -157,7 +155,7 @@ class GL(PlannerAlgo):
             # predict subgoal observations with goal network
             pred_subgoals = self.nets["goal_network"](obs=batch["obs"], goal=batch["goal_obs"])
 
-            # compute loss as L2 error for each observation key
+            # compute loss as L2 error for each modality
             losses = OrderedDict()
             target_subgoals = batch["target_subgoals"]  # targets for network prediction
             goal_loss = 0.
@@ -270,8 +268,8 @@ class GL_VAE(GL):
             condition_shapes=self.obs_shapes,
             goal_shapes=self.goal_shapes,
             device=self.device,
-            encoder_kwargs=ObsUtils.obs_encoder_kwargs_from_config(self.obs_config.encoder),
             **VAENets.vae_args_from_config(self.algo_config.vae),
+            **ObsNets.obs_encoder_args_from_config(self.obs_config.encoder),
         )
 
         self.nets = self.nets.float().to(self.device)
@@ -510,7 +508,7 @@ class ValuePlanner(PlannerAlgo, ValueAlgo):
         algo_config,
         obs_config,
         global_config,
-        obs_key_shapes,
+        modality_shapes,
         ac_dim,
         device,
 
@@ -529,7 +527,7 @@ class ValuePlanner(PlannerAlgo, ValueAlgo):
 
             global_config (Config object); global config
 
-            obs_key_shapes (OrderedDict): dictionary that maps input/output observation keys to shapes
+            modality_shapes (OrderedDict): dictionary that maps input/output modality keys to shapes
 
             ac_dim (int): action dimension
 
@@ -546,7 +544,7 @@ class ValuePlanner(PlannerAlgo, ValueAlgo):
             algo_config=algo_config.planner,
             obs_config=obs_config.planner,
             global_config=global_config,
-            obs_key_shapes=obs_key_shapes,
+            modality_shapes=modality_shapes,
             ac_dim=ac_dim,
             device=device
         )
@@ -555,7 +553,7 @@ class ValuePlanner(PlannerAlgo, ValueAlgo):
             algo_config=algo_config.value,
             obs_config=obs_config.value,
             global_config=global_config,
-            obs_key_shapes=obs_key_shapes,
+            modality_shapes=modality_shapes,
             ac_dim=ac_dim,
             device=device
         )
@@ -580,9 +578,7 @@ class ValuePlanner(PlannerAlgo, ValueAlgo):
         input_batch["planner"] = self.planner.process_batch_for_training(batch)
         input_batch["value_net"] = self.value_net.process_batch_for_training(batch)
 
-        # we move to device first before float conversion because image observation modalities will be uint8 -
-        # this minimizes the amount of data transferred to GPU
-        return TensorUtils.to_float(TensorUtils.to_device(input_batch, self.device))
+        return TensorUtils.to_device(TensorUtils.to_float(input_batch), self.device)
 
     def train_on_batch(self, batch, epoch, validate=False):
         """

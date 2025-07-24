@@ -46,60 +46,12 @@ def example_dataset_path():
     from a server if it does not exist.
     """
     dataset_folder = os.path.join(robomimic.__path__[0], "../tests/assets/")
-
-    # try to determine version of robosuite to grab the correct test hdf5
-    robosuite_is_v12 = True
-    robosuite_is_v14 = False
-    robosuite_is_v15 = False
-    try:
-        import robosuite
-        main_version = int(robosuite.__version__.split(".")[0])
-        sub_version = int(robosuite.__version__.split(".")[1])
-        if (main_version > 1) or (main_version == 1 and sub_version >= 5):
-            robosuite_is_v15 = True
-            robosuite_is_v12 = False
-        elif (main_version == 1 and sub_version == 4):
-            robosuite_is_v14 = True
-            robosuite_is_v12 = False
-    except ImportError:
-        pass
-
-    if robosuite_is_v12:
-        dataset_path = os.path.join(dataset_folder, "test.hdf5")
-    elif robosuite_is_v14:
-        dataset_path = os.path.join(dataset_folder, "test_v141.hdf5")
-    else:
-        dataset_path = os.path.join(dataset_folder, "test_v15.hdf5")
+    dataset_path = os.path.join(dataset_folder, "test.hdf5")
     if not os.path.exists(dataset_path):
         print("\nWARNING: test hdf5 does not exist! Downloading from server...")
         os.makedirs(dataset_folder, exist_ok=True)
-        FileUtils.download_file_from_hf(
-            repo_id=robomimic.HF_REPO_ID,
-            filename="test/{}".format(os.path.basename(dataset_path)),
-            download_dir=dataset_folder,
-            check_overwrite=True,
-        )
-    return dataset_path
-
-
-def example_momart_dataset_path():
-    """
-    Path to momart dataset to use for testing and example purposes. It should
-    exist under the tests/assets directory, and will be downloaded
-    from a server if it does not exist.
-    """
-    dataset_folder = os.path.join(robomimic.__path__[0], "../tests/assets/")
-    dataset_path = os.path.join(dataset_folder, "test_momart.hdf5")
-    if not os.path.exists(dataset_path):
-        user_response = input("\nWARNING: momart test hdf5 does not exist! We will download sample dataset. "
-                              "This will take 0.6GB space. Proceed? y/n\n")
-        assert user_response.lower() in {"yes", "y"}, f"Did not receive confirmation. Aborting download."
-
-        print("\nDownloading from server...")
-
-        os.makedirs(dataset_folder, exist_ok=True)
         FileUtils.download_url(
-            url="http://downloads.cs.stanford.edu/downloads/rt_mm/sample/test_momart.hdf5",
+            url="http://downloads.cs.stanford.edu/downloads/rt_benchmark/test.hdf5", 
             download_dir=dataset_folder,
         )
     return dataset_path
@@ -154,10 +106,6 @@ def get_base_config(algo_name):
     config.experiment.epoch_every_n_steps = 3
     config.experiment.validation_epoch_every_n_steps = 3
     config.train.num_epochs = 1
-
-    # default train and validation filter keys
-    config.train.hdf5_filter_key = "train"
-    config.train.hdf5_validation_filter_key = "valid"
 
     # ensure model saving, rollout, and offscreen video rendering are tested too
     config.experiment.save.enabled = True

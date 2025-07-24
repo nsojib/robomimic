@@ -60,7 +60,6 @@ class BaseConfig(Config):
         self.train_config()
         self.algo_config()
         self.observation_config()
-        self.meta_config()
 
         # After Config init, new keys cannot be added to the config, except under nested
         # attributes that have called @do_not_lock_keys
@@ -82,12 +81,11 @@ class BaseConfig(Config):
         """
 
         self.experiment.name = "test"                               # name of experiment used to make log files
-        self.experiment.validate = False                            # whether to do validation or not
+        self.experiment.validate = True                             # whether to do validation or not
         self.experiment.logging.terminal_output_to_txt = True       # whether to log stdout to txt file 
         self.experiment.logging.log_tb = True                       # enable tensorboard logging
-        self.experiment.logging.log_wandb = False                   # enable wandb logging
-        self.experiment.logging.wandb_proj_name = "debug"           # project name if using wandb
-                
+
+
         ## save config - if and when to save model checkpoints ##
         self.experiment.save.enabled = True                         # whether model saving should be enabled or disabled
         self.experiment.save.every_n_seconds = None                 # save model every n seconds (set to None to disable)
@@ -102,8 +100,8 @@ class BaseConfig(Config):
         self.experiment.validation_epoch_every_n_steps = 10         # number of gradient steps in valid epoch (None for full dataset pass)
 
         # envs to evaluate model on (assuming rollouts are enabled), to override the metadata stored in dataset
-        self.experiment.env = None                                  # no need to set this (unless you want to override); if set, uses env metadata from the first dataset in self.train.data
-        self.experiment.additional_envs = None                      # additional environments that should get evaluated; uses env metadata from the first dataset in self.train.data
+        self.experiment.env = None                                  # no need to set this (unless you want to override)
+        self.experiment.additional_envs = None                      # additional environments that should get evaluated
 
 
         ## rendering config ##
@@ -121,13 +119,6 @@ class BaseConfig(Config):
         self.experiment.rollout.warmstart = 0                       # number of epochs to wait before starting rollouts
         self.experiment.rollout.terminate_on_success = True         # end rollout early after task success
 
-        # for updating the evaluation env meta data
-        self.experiment.env_meta_update_dict = Config()
-        self.experiment.env_meta_update_dict.do_not_lock_keys()
-
-        # whether to load in a previously trained model checkpoint
-        self.experiment.ckpt_path = None
-
     def train_config(self):
         """
         This function populates the `config.train` attribute of the config, which 
@@ -136,15 +127,7 @@ class BaseConfig(Config):
         class has a default implementation that usually doesn't need to be overriden.
         """
 
-        # List of hdf5 datasets to use for training
-        # Each dataset should be a dictionary with the following keys:
-        # - "path" (str)        :   path to the hdf5 file
-        # - "eval" (bool)       :   (optional) whether to evaluate policy on this dataset's env, defaults to True
-        # - "lang" (str)        :   (optional) language instruction to use for the dataset (e.g., "make coffee"), otherwise use "dummy"
-        # - "key" (str)         :   (optional) key to use for naming eval videos (e.g., "coffee"), defaults to hdf5 file name
-        # - "filter_key" (str)  : (optional) key to use for filtering the dataset, defaults to None
-        # - "demo_limit" (int)  :   (optional) limit the number of demos to use for training
-        # - "weight" (float)    :   (optional) weight for the dataset, defaults to 1.0
+        # Path to hdf5 dataset to use for training
         self.train.data = None                                      
 
         # Write all results to this directory. A new folder with the timestamp will be created
@@ -156,9 +139,6 @@ class BaseConfig(Config):
 
 
         ## dataset loader config ##
-
-        # whether or not to normalize dataset weights by size
-        self.train.normalize_weights_by_ds_size = False
 
         # num workers for loading data - generally set to 0 for low-dim datasets, and 2 for image datasets
         self.train.num_data_workers = 0  
@@ -172,9 +152,6 @@ class BaseConfig(Config):
         # used for parallel data loading
         self.train.hdf5_use_swmr = True
 
-        # whether to load "next_obs" group from hdf5 - only needed for batch / offline RL algorithms
-        self.train.hdf5_load_next_obs = True
-
         # if true, normalize observations at train and test time, using the global mean and standard deviation
         # of each observation in each dimension, computed across the training set. See SequenceDataset.normalize_obs
         # in utils/dataset.py for more information.
@@ -184,16 +161,8 @@ class BaseConfig(Config):
         # of the full dataset. This provides a convenient way to train on only a subset of the trajectories in a dataset.
         self.train.hdf5_filter_key = None
 
-        # if provided, use the list of demo keys under the hdf5 group "mask/@hdf5_validation_filter_key" for validation.
-        # Must be provided if @experiment.validate is True.
-        self.train.hdf5_validation_filter_key = None
-
         # length of experience sequence to fetch from the dataset
-        # and whether to pad the beginning / end of the sequence at boundaries of trajectory in dataset
         self.train.seq_length = 1
-        self.train.pad_seq_length = True
-        self.train.frame_stack = 1
-        self.train.pad_frame_stack = True
 
         # keys from hdf5 to load into each batch, besides "obs" and "next_obs". If algorithms
         # require additional keys from each trajectory in the hdf5, they should be specified here.
@@ -202,29 +171,6 @@ class BaseConfig(Config):
             "rewards", 
             "dones",
         )
-
-        # list of action keys to use for prediction - each should correspond to a key in self.train.action_config.
-        # Importantly, the order matters - these keys will be concatenated into a single action vector.
-        self.train.action_keys = ["actions"]
-
-        # specifing each action keys to load and their corresponding normalization/conversion requirement
-        # e.g. for dataset keys "action/eef_pos" and "action/eef_rot"
-        # the desired value of self.train.action_config is: 
-        # {
-        #   "action/eef_pos": {
-        #       "normalization": "min_max",
-        #       "rot_conversion: None  
-        #   },
-        #   "action/eef_rot": {
-        #       "normalization": None,
-        #       "rot_conversion: "axis_angle_to_6d"
-        #   }
-        # }
-        self.train.action_config = {
-            "actions": {
-                "normalization": None
-            }
-        }
 
         # one of [None, "last"] - set to "last" to include goal observations in each batch
         self.train.goal_mode = None
@@ -235,8 +181,6 @@ class BaseConfig(Config):
         self.train.batch_size = 100     # batch size
         self.train.num_epochs = 2000    # number of training epochs
         self.train.seed = 1             # seed for training (for reproducibility)
-
-        self.train.max_grad_norm = None  # clip gradient norms (see `backprop_for_loss` function in torch_utils.py) 
 
     def algo_config(self):
         """
@@ -267,86 +211,49 @@ class BaseConfig(Config):
             "robot0_gripper_qpos", 
             "object",
         ]
-        self.observation.modalities.obs.rgb = []              # specify rgb image observations for agent
-        self.observation.modalities.obs.depth = []
-        self.observation.modalities.obs.scan = []
-        self.observation.modalities.goal.low_dim = []           # specify low-dim goal observations to condition agent on
-        self.observation.modalities.goal.rgb = []             # specify rgb image goal observations to condition agent on
-        self.observation.modalities.goal.depth = []
-        self.observation.modalities.goal.scan = []
-        self.observation.modalities.obs.do_not_lock_keys()
-        self.observation.modalities.goal.do_not_lock_keys()
+        self.observation.modalities.obs.image = []              # specify image observations for agent
+        self.observation.modalities.goal.low_dim = []           # specify low-dim goal bservations to condition agent on
+        self.observation.modalities.goal.image = []             # specify image goal bservations to condition agent on
 
-        # observation encoder architectures (per obs modality)
-        # This applies to all networks that take observation dicts as input
+        # observation encoder architecture - applies to all networks that take observation dicts as input
+        self.observation.encoder.visual_core = 'ResNet18Conv'   # visual core network backbone for image observations (unused if no image observations)
+        # kwargs for visual core class specified above
+        self.observation.encoder.visual_core_kwargs.pretrained = False
+        self.observation.encoder.visual_core_kwargs.input_coord_conv = False
+        self.observation.encoder.visual_core_kwargs.do_not_lock_keys()
 
-        # =============== Low Dim default encoder (no encoder) ===============
-        self.observation.encoder.low_dim.core_class = None
-        self.observation.encoder.low_dim.core_kwargs = Config()                 # No kwargs by default
-        self.observation.encoder.low_dim.core_kwargs.do_not_lock_keys()
+        # observation randomizer class - set to None to use no randomization, or 'CropRandomizer' to use crop randomization
+        self.observation.encoder.obs_randomizer_class = None
 
-        # Low Dim: Obs Randomizer settings
-        self.observation.encoder.low_dim.obs_randomizer_class = None
-        self.observation.encoder.low_dim.obs_randomizer_kwargs = Config()       # No kwargs by default
-        self.observation.encoder.low_dim.obs_randomizer_kwargs.do_not_lock_keys()
+        # kwargs for observation randomizers (for the CropRandomizer, this is size and number of crops)
+        self.observation.encoder.obs_randomizer_kwargs.crop_height = 76
+        self.observation.encoder.obs_randomizer_kwargs.crop_width = 76
+        self.observation.encoder.obs_randomizer_kwargs.num_crops = 1
+        self.observation.encoder.obs_randomizer_kwargs.pos_enc = False
+        self.observation.encoder.obs_randomizer_kwargs.do_not_lock_keys()
 
-        # =============== RGB default encoder (ResNet backbone + linear layer output) ===============
-        self.observation.encoder.rgb.core_class = "VisualCore"                  # Default VisualCore class combines backbone (like ResNet-18) with pooling operation (like spatial softmax)
-        self.observation.encoder.rgb.core_kwargs = Config()                     # See models/obs_core.py for important kwargs to set and defaults used
-        self.observation.encoder.rgb.core_kwargs.do_not_lock_keys()
+        self.observation.encoder.visual_feature_dimension = 64  # images are encoded into feature vectors of this size
+        self.observation.encoder.use_spatial_softmax = True     # whether to use spatial softmax layer at end of conv layers
 
-        # RGB: Obs Randomizer settings
-        self.observation.encoder.rgb.obs_randomizer_class = None                # Can set to 'CropRandomizer' to use crop randomization
-        self.observation.encoder.rgb.obs_randomizer_kwargs = Config()           # See models/obs_core.py for important kwargs to set and defaults used
-        self.observation.encoder.rgb.obs_randomizer_kwargs.do_not_lock_keys()
+        # kwargs for spatial softmax layer
+        self.observation.encoder.spatial_softmax_kwargs.num_kp = 32
+        self.observation.encoder.spatial_softmax_kwargs.learnable_temperature = False
+        self.observation.encoder.spatial_softmax_kwargs.temperature = 1.0
+        self.observation.encoder.spatial_softmax_kwargs.noise_std = 0.0
+        self.observation.encoder.spatial_softmax_kwargs.do_not_lock_keys()
 
-        # Allow for other custom modalities to be specified
-        self.observation.encoder.do_not_lock_keys()
 
-        # =============== Depth default encoder (same as rgb) ===============
-        self.observation.encoder.depth = deepcopy(self.observation.encoder.rgb)
-
-        # =============== Scan default encoder (Conv1d backbone + linear layer output) ===============
-        self.observation.encoder.scan = deepcopy(self.observation.encoder.rgb)
-
-        # Scan: Modify the core class + kwargs, otherwise, is same as rgb encoder
-        self.observation.encoder.scan.core_class = "ScanCore"                   # Default ScanCore class uses Conv1D to process this modality
-        self.observation.encoder.scan.core_kwargs = Config()                    # See models/obs_core.py for important kwargs to set and defaults used
-        self.observation.encoder.scan.core_kwargs.do_not_lock_keys()
-
-    def meta_config(self):
-        """
-        This function populates the `config.meta` attribute of the config. This portion of the config 
-        is used to specify job information primarily for hyperparameter sweeps.
-        It contains hyperparameter keys and values, which are populated automatically
-        by the hyperparameter config generator (see `utils/hyperparam_utils.py`).
-        These values are read by the wandb logger (see `utils/log_utils.py`) to set job tags.
-        """
-        
-        self.meta.hp_base_config_file = None            # base config file in hyperparam sweep
-        self.meta.hp_keys = []                          # relevant keys (swept) in hyperparam sweep
-        self.meta.hp_values = []                        # values corresponding to keys in hyperparam sweep
-    
     @property
     def use_goals(self):
         # whether the agent is goal-conditioned
-        return len([obs_key for modality in self.observation.modalities.goal.values() for obs_key in modality]) > 0
+        return len(self.observation.modalities.goal.low_dim + self.observation.modalities.goal.image) > 0
 
     @property
-    def all_obs_keys(self):
-        """
-        This grabs the union of observation keys over all modalities (e.g.: low_dim, rgb, depth, etc.) and over all
-        modality groups (e.g: obs, goal, subgoal, etc...)
-
-        Returns:
-            n-array: all observation keys used for this model
-        """
+    def all_modalities(self):
         # pool all modalities
-        return sorted(tuple(set([
-            obs_key for group in [
-                self.observation.modalities.obs.values(),
-                self.observation.modalities.goal.values()
-            ]
-            for modality in group
-            for obs_key in modality
-         ])))
+        return sorted(tuple(set(
+            self.observation.modalities.obs.low_dim + 
+            self.observation.modalities.obs.image + 
+            self.observation.modalities.goal.low_dim + 
+            self.observation.modalities.goal.image
+        )))

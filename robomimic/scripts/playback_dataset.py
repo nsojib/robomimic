@@ -49,12 +49,6 @@ Example usage below:
         --use-obs --render_image_names agentview_image \
         --video_path /tmp/obs_trajectory.mp4
 
-    # visualize depth observations along with image observations
-    python playback_dataset.py --dataset /path/to/dataset.hdf5 \
-        --use-obs --render_image_names agentview_image \
-        --render_depth_names agentview_depth \
-        --video_path /tmp/obs_trajectory.mp4
-
     # visualize initial states in the demonstration data
     python playback_dataset.py --dataset /path/to/dataset.hdf5 \
         --first --render_image_names agentview \
@@ -67,22 +61,12 @@ import h5py
 import argparse
 import imageio
 import numpy as np
-import random
 
 import robomimic
 import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.file_utils as FileUtils
-from robomimic.utils.vis_utils import depth_to_rgb
-from robomimic.envs.env_base import EnvBase, EnvType
-
-
-# Define default cameras to use for each env type
-DEFAULT_CAMERAS = {
-    EnvType.ROBOSUITE_TYPE: ["agentview"],
-    EnvType.IG_MOMART_TYPE: ["rgb"],
-    EnvType.GYM_TYPE: ValueError("No camera names supported for gym type env!"),
-}
+from robomimic.envs.env_base import EnvBase
 
 
 def playback_trajectory_with_env(
@@ -120,10 +104,7 @@ def playback_trajectory_with_env(
     assert not (render and write_video)
 
     # load the initial state
-    ## this reset call doesn't seem necessary.
-    ## seems ok to remove but haven't fully tested it.
-    ## removing for now
-    # env.reset()
+    env.reset()
     env.reset_to(initial_state)
 
     traj_len = states.shape[0]
@@ -166,11 +147,10 @@ def playback_trajectory_with_obs(
     video_writer, 
     video_skip=5, 
     image_names=None,
-    depth_names=None,
     first=False,
 ):
     """
-    This function reads all "rgb" (and possibly "depth") observations in the dataset trajectory and
+    This function reads all "image" observations in the dataset trajectory and
     writes them into a video.
 
     Args:
@@ -179,24 +159,17 @@ def playback_trajectory_with_obs(
         video_skip (int): determines rate at which environment frames are written to video
         image_names (list): determines which image observations are used for rendering. Pass more than
             one to output a video with multiple image observations concatenated horizontally.
-        depth_names (list): determines which depth observations are used for rendering (if any).
         first (bool): if True, only use the first frame of each episode.
     """
     assert image_names is not None, "error: must specify at least one image observation to use in @image_names"
     video_count = 0
-
-    if depth_names is not None:
-        # compute min and max depth value across trajectory for normalization
-        depth_min = { k : traj_grp["obs/{}".format(k)][:].min() for k in depth_names }
-        depth_max = { k : traj_grp["obs/{}".format(k)][:].max() for k in depth_names }
 
     traj_len = traj_grp["actions"].shape[0]
     for i in range(traj_len):
         if video_count % video_skip == 0:
             # concatenate image obs together
             im = [traj_grp["obs/{}".format(k)][i] for k in image_names]
-            depth = [depth_to_rgb(traj_grp["obs/{}".format(k)][i], depth_min=depth_min[k], depth_max=depth_max[k]) for k in depth_names] if depth_names is not None else []
-            frame = np.concatenate(im + depth, axis=1)
+            frame = np.concatenate(im, axis=1)
             video_writer.append_data(frame)
         video_count += 1
 
@@ -208,24 +181,12 @@ def playback_dataset(args):
     # some arg checking
     write_video = (args.video_path is not None)
     assert not (args.render and write_video) # either on-screen or video but not both
-
-    # Auto-fill camera rendering info if not specified
-    if args.render_image_names is None:
-        # We fill in the automatic values
-        env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=args.dataset)
-        env_type = EnvUtils.get_env_type(env_meta=env_meta)
-        args.render_image_names = DEFAULT_CAMERAS[env_type]
-
     if args.render:
         # on-screen rendering can only support one camera
         assert len(args.render_image_names) == 1
-
     if args.use_obs:
         assert write_video, "playback with observations can only write to video"
         assert not args.use_actions, "playback with observations is offline and does not support action playback"
-
-    if args.render_depth_names is not None:
-        assert args.use_obs, "depth observations can only be visualized from observations currently"
 
     # create environment only if not playing back with observations
     if not args.use_obs:
@@ -234,7 +195,7 @@ def playback_dataset(args):
         dummy_spec = dict(
             obs=dict(
                     low_dim=["robot0_eef_pos"],
-                    rgb=[],
+                    image=[],
                 ),
         )
         ObsUtils.initialize_obs_utils_with_obs_specs(obs_modality_specs=dummy_spec)
@@ -255,10 +216,9 @@ def playback_dataset(args):
         demos = list(f["data"].keys())
     inds = np.argsort([int(elem[5:]) for elem in demos])
     demos = [demos[i] for i in inds]
-    
+
     # maybe reduce the number of demonstrations to playback
     if args.n is not None:
-        random.shuffle(demos)
         demos = demos[:args.n]
 
     # maybe dump video
@@ -276,7 +236,6 @@ def playback_dataset(args):
                 video_writer=video_writer, 
                 video_skip=args.video_skip,
                 image_names=args.render_image_names,
-                depth_names=args.render_depth_names,
                 first=args.first,
             )
             continue
@@ -286,7 +245,6 @@ def playback_dataset(args):
         initial_state = dict(states=states[0])
         if is_robosuite_env:
             initial_state["model"] = f["data/{}".format(ep)].attrs["model_file"]
-            initial_state["ep_meta"] = f["data/{}".format(ep)].attrs.get("ep_meta", None)
 
         # supply actions if using open-loop action playback
         actions = None
@@ -373,18 +331,8 @@ if __name__ == "__main__":
         "--render_image_names",
         type=str,
         nargs='+',
-        default=None,
-        help="(optional) camera name(s) / image observation(s) to use for rendering on-screen or to video. Default is"
-             "None, which corresponds to a predefined camera for each env type",
-    )
-
-    # depth observations to use for writing to video
-    parser.add_argument(
-        "--render_depth_names",
-        type=str,
-        nargs='+',
-        default=None,
-        help="(optional) depth observation(s) to use for rendering to video"
+        default=["agentview"],
+        help="(optional) camera name(s) / image observation(s) to use for rendering on-screen or to video",
     )
 
     # Only use the first frame of each episode

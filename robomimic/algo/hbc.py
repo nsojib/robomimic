@@ -46,7 +46,7 @@ class HBC(HierarchicalAlgo):
         algo_config,
         obs_config,
         global_config,
-        obs_key_shapes,
+        modality_shapes,
         ac_dim,
         device,
     ):
@@ -64,7 +64,7 @@ class HBC(HierarchicalAlgo):
 
             global_config (Config object): global training config
 
-            obs_key_shapes (dict): dictionary that maps input/output observation keys to shapes
+            modality_shapes (dict): dictionary that maps input/output modality keys to shapes
 
             ac_dim (int): action dimension
 
@@ -90,7 +90,7 @@ class HBC(HierarchicalAlgo):
             algo_config=algo_config.planner,
             obs_config=obs_config.planner,
             global_config=global_config,
-            obs_key_shapes=obs_key_shapes,
+            modality_shapes=modality_shapes,
             ac_dim=ac_dim,
             device=device
         )
@@ -102,26 +102,29 @@ class HBC(HierarchicalAlgo):
             self.actor_goal_shapes = OrderedDict(latent_subgoal=(self.planner.algo_config.vae.latent_dim,))
 
         # only for the actor: override goal modalities and shapes to match the subgoal set by the planner
-        actor_obs_key_shapes = deepcopy(obs_key_shapes)
-        # make sure we are not modifying existing observation key shapes
+        actor_modality_shapes = deepcopy(modality_shapes)
+        # make sure we are not modifying existing modality shapes
         for k in self.actor_goal_shapes:
-            if k in actor_obs_key_shapes:
-                assert actor_obs_key_shapes[k] == self.actor_goal_shapes[k]
-        actor_obs_key_shapes.update(self.actor_goal_shapes)
+            if k in actor_modality_shapes:
+                assert actor_modality_shapes[k] == self.actor_goal_shapes[k]
+        actor_modality_shapes.update(self.actor_goal_shapes)
 
-        goal_obs_keys = {obs_modality: [] for obs_modality in ObsUtils.OBS_MODALITY_CLASSES.keys()}
+        goal_modalities = {"low_dim": [], "image": []}
         for k in self.actor_goal_shapes.keys():
-            goal_obs_keys[ObsUtils.OBS_KEYS_TO_MODALITIES[k]].append(k)
+            if ObsUtils.key_is_image(k):
+                goal_modalities["image"].append(k)
+            else:
+                goal_modalities["low_dim"].append(k)
 
         actor_obs_config = deepcopy(obs_config.actor)
         with actor_obs_config.unlocked():
-            actor_obs_config["goal"] = Config(**goal_obs_keys)
+            actor_obs_config["goal"] = Config(**goal_modalities)
 
         self.actor = policy_algo_class(
             algo_config=algo_config.actor,
             obs_config=actor_obs_config,
             global_config=global_config,
-            obs_key_shapes=actor_obs_key_shapes,
+            modality_shapes=actor_modality_shapes,
             ac_dim=ac_dim,
             device=device,
         )
@@ -149,7 +152,7 @@ class HBC(HierarchicalAlgo):
             policy_subgoal_indices = torch.randint(
                 low=0, high=self.global_config.train.seq_length, size=(batch["actions"].shape[0],))
             goal_obs = TensorUtils.gather_sequence(batch["next_obs"], policy_subgoal_indices)
-            goal_obs = TensorUtils.to_float(TensorUtils.to_device(goal_obs, self.device))
+            goal_obs = TensorUtils.to_device(TensorUtils.to_float(goal_obs), self.device)
             input_batch["actor"]["goal_obs"] = \
                 self.planner.get_actor_goal_for_training_from_processed_batch(
                     goal_obs,
@@ -167,9 +170,7 @@ class HBC(HierarchicalAlgo):
                     num_prior_samples=self.algo_config.latent_subgoal.prior_correction.num_samples,
                 )
 
-        # we move to device first before float conversion because image observation modalities will be uint8 -
-        # this minimizes the amount of data transferred to GPU
-        return TensorUtils.to_float(TensorUtils.to_device(input_batch, self.device))
+        return TensorUtils.to_device(TensorUtils.to_float(input_batch), self.device)
 
     def train_on_batch(self, batch, epoch, validate=False):
         """
@@ -294,9 +295,9 @@ class HBC(HierarchicalAlgo):
         for k, v in sg.items():
             if not self.algo_config.latent_subgoal.enabled:
                 # subgoal should only match subgoal shapes if not using latent subgoals
-                assert list(v.shape[1:]) == list(self.planner.subgoal_shapes[k])
+                assert v.shape[1:] == self.planner.subgoal_shapes[k]
             # subgoal shapes should always match actor goal shapes
-            assert list(v.shape[1:]) == list(self.actor_goal_shapes[k])
+            assert v.shape[1:] == self.actor_goal_shapes[k]
         self._current_subgoal = { k : sg[k].clone() for k in sg }
 
     def get_action(self, obs_dict, goal_dict=None):

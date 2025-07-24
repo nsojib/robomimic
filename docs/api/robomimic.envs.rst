@@ -20,26 +20,10 @@ robomimic.envs.env\_gym module
    :undoc-members:
    :show-inheritance:
 
-robomimic.envs.env\_ig\_momart module
--------------------------------------
-
-.. automodule:: robomimic.envs.env_ig_momart
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 robomimic.envs.env\_robosuite module
 ------------------------------------
 
 .. automodule:: robomimic.envs.env_robosuite
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-robomimic.envs.wrappers module
-------------------------------
-
-.. automodule:: robomimic.envs.wrappers
    :members:
    :undoc-members:
    :show-inheritance:

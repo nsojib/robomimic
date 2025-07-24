@@ -72,24 +72,24 @@ def modify_config_for_default_low_dim_exp(config):
         ]
         # handle hierarchical observation configs
         if config.algo_name == "hbc":
-            configs_to_set = [
+            mod_configs_to_set = [
                 config.observation.actor.modalities.obs,
                 config.observation.planner.modalities.obs,
                 config.observation.planner.modalities.subgoal,
             ]
         elif config.algo_name == "iris":
-            configs_to_set = [
+            mod_configs_to_set = [
                 config.observation.actor.modalities.obs,
                 config.observation.value_planner.planner.modalities.obs,
                 config.observation.value_planner.planner.modalities.subgoal,
                 config.observation.value_planner.value.modalities.obs,
             ]
         else:
-            configs_to_set = [config.observation.modalities.obs]
+            mod_configs_to_set = [config.observation.modalities.obs]
         # set all observations / subgoals to use the correct low-dim modalities
-        for cfg in configs_to_set:
-            cfg.low_dim = list(default_low_dim_obs)
-            cfg.rgb = []
+        for mod_config in mod_configs_to_set:
+            mod_config.low_dim = list(default_low_dim_obs)
+            mod_config.image = []
 
     return config
 
@@ -140,33 +140,30 @@ def modify_config_for_default_image_exp(config):
             "robot0_eef_quat", 
             "robot0_gripper_qpos", 
         ]
-        config.observation.modalities.obs.rgb = [
+        config.observation.modalities.obs.image = [
             "agentview_image",
             "robot0_eye_in_hand_image",
         ]
         config.observation.modalities.goal.low_dim = []
-        config.observation.modalities.goal.rgb = []
+        config.observation.modalities.goal.image = []
 
         # default image encoder architecture is ResNet with spatial softmax
-        config.observation.encoder.rgb.core_class = "VisualCore"
-        config.observation.encoder.rgb.core_kwargs.feature_dimension = 64
-        config.observation.encoder.rgb.core_kwargs.backbone_class = 'ResNet18Conv'                         # ResNet backbone for image observations (unused if no image observations)
-        config.observation.encoder.rgb.core_kwargs.backbone_kwargs.pretrained = False                # kwargs for visual core
-        config.observation.encoder.rgb.core_kwargs.backbone_kwargs.input_coord_conv = False
-        config.observation.encoder.rgb.core_kwargs.pool_class = "SpatialSoftmax"                # Alternate options are "SpatialMeanPool" or None (no pooling)
-        config.observation.encoder.rgb.core_kwargs.pool_kwargs.num_kp = 32                      # Default arguments for "SpatialSoftmax"
-        config.observation.encoder.rgb.core_kwargs.pool_kwargs.learnable_temperature = False    # Default arguments for "SpatialSoftmax"
-        config.observation.encoder.rgb.core_kwargs.pool_kwargs.temperature = 1.0                # Default arguments for "SpatialSoftmax"
-        config.observation.encoder.rgb.core_kwargs.pool_kwargs.noise_std = 0.0
+        config.observation.encoder.visual_core = 'ResNet18Conv'
+        config.observation.encoder.visual_core_kwargs = Config()
+        config.observation.encoder.visual_feature_dimension = 64
 
-        # observation randomizer class - set to None to use no randomization, or 'CropRandomizer' to use crop randomization
-        config.observation.encoder.rgb.obs_randomizer_class = "CropRandomizer"
+        config.observation.encoder.use_spatial_softmax = True
+        config.observation.encoder.spatial_softmax_kwargs.num_kp = 32
+        config.observation.encoder.spatial_softmax_kwargs.learnable_temperature = False
+        config.observation.encoder.spatial_softmax_kwargs.temperature = 1.0
+        config.observation.encoder.spatial_softmax_kwargs.noise_std = 0.
 
-        # kwargs for observation randomizers (for the CropRandomizer, this is size and number of crops)
-        config.observation.encoder.rgb.obs_randomizer_kwargs.crop_height = 76
-        config.observation.encoder.rgb.obs_randomizer_kwargs.crop_width = 76
-        config.observation.encoder.rgb.obs_randomizer_kwargs.num_crops = 1
-        config.observation.encoder.rgb.obs_randomizer_kwargs.pos_enc = False
+        # use crop randomization as well
+        config.observation.encoder.obs_randomizer_class = 'CropRandomizer'  # observation randomizer class
+        config.observation.encoder.obs_randomizer_kwargs.crop_height = 76
+        config.observation.encoder.obs_randomizer_kwargs.crop_width = 76
+        config.observation.encoder.obs_randomizer_kwargs.num_crops = 1
+        config.observation.encoder.obs_randomizer_kwargs.pos_enc = False
 
     return config
 
@@ -215,34 +212,17 @@ def modify_config_for_dataset(config, task_name, dataset_type, hdf5_type, base_d
         if dataset_type == "mg":
             # machine-generated datasets did not use validation
             config.experiment.validate = False
-        else:
-            # all other datasets used validation
-            config.experiment.validate = True
 
         if is_real_dataset:
             # no evaluation rollouts for real robot training
             config.experiment.rollout.enabled = False
 
     with config.train.values_unlocked():
-        # set dataset path and possibly filter keys
-        url = DATASET_REGISTRY[task_name][dataset_type][hdf5_type]["url"]
-        if url is None:
-            # infer file_name
-            if task_name in ["lift", "can", "square", "tool_hang", "transport"]:
-                file_name = "{}_v141.hdf5".format(hdf5_type)
-            elif task_name in ["lift_real", "can_real", "tool_hang_real"]:
-                file_name = "{}.hdf5".format(hdf5_type)
-            else:
-                raise ValueError("Unknown dataset type")
-        else:
-            file_name = url.split("/")[-1]
+        # set dataset path and possibly filter key
+        file_name = DATASET_REGISTRY[task_name][dataset_type][hdf5_type]["url"].split("/")[-1]
         config.train.data = os.path.join(base_dataset_dir, task_name, dataset_type, file_name)
-        config.train.hdf5_filter_key = None if filter_key is None else filter_key
-        config.train.hdf5_validation_filter_key = None
-        if config.experiment.validate:
-            # set train and valid keys for validation
-            config.train.hdf5_filter_key = "train" if filter_key is None else "{}_train".format(filter_key)
-            config.train.hdf5_validation_filter_key = "valid" if filter_key is None else "{}_valid".format(filter_key)
+        if filter_key is not None:
+            config.train.hdf5_filter_key = filter_key
 
     with config.observation.values_unlocked():
         # maybe modify observation names and randomization sizes (since image size might be different)
@@ -256,22 +236,22 @@ def modify_config_for_dataset(config, task_name, dataset_type, hdf5_type, base_d
 
             if task_name == "tool_hang_real":
                 # side and wrist camera
-                config.observation.modalities.obs.rgb = [
+                config.observation.modalities.obs.image = [
                     "image_side",
                     "image_wrist",
                 ]
                 # 240x240 images -> crops should be 216x216
-                config.observation.encoder.rgb.obs_randomizer_kwargs.crop_height = 216
-                config.observation.encoder.rgb.obs_randomizer_kwargs.crop_width = 216
+                config.observation.encoder.obs_randomizer_kwargs.crop_height = 216
+                config.observation.encoder.obs_randomizer_kwargs.crop_width = 216
             else:
                 # front and wrist camera
-                config.observation.modalities.obs.rgb = [
+                config.observation.modalities.obs.image = [
                     "image",
                     "image_wrist",
                 ]
                 # 120x120 images -> crops should be 108x108
-                config.observation.encoder.rgb.obs_randomizer_kwargs.crop_height = 108
-                config.observation.encoder.rgb.obs_randomizer_kwargs.crop_width = 108
+                config.observation.encoder.obs_randomizer_kwargs.crop_height = 108
+                config.observation.encoder.obs_randomizer_kwargs.crop_width = 108
 
         elif hdf5_type in ["image", "image_sparse", "image_dense"]:
             if task_name == "transport":
@@ -286,7 +266,7 @@ def modify_config_for_dataset(config, task_name, dataset_type, hdf5_type, base_d
                 ]
 
                 # shoulder and wrist cameras per arm
-                config.observation.modalities.obs.rgb = [
+                config.observation.modalities.obs.image = [
                     "shouldercamera0_image",
                     "robot0_eye_in_hand_image",
                     "shouldercamera1_image",
@@ -294,13 +274,13 @@ def modify_config_for_dataset(config, task_name, dataset_type, hdf5_type, base_d
                 ]
             elif task_name == "tool_hang":
                 # side and wrist camera
-                config.observation.modalities.obs.rgb = [
+                config.observation.modalities.obs.image = [
                     "sideview_image",
                     "robot0_eye_in_hand_image",
                 ]
                 # 240x240 images -> crops should be 216x216
-                config.observation.encoder.rgb.obs_randomizer_kwargs.crop_height = 216
-                config.observation.encoder.rgb.obs_randomizer_kwargs.crop_width = 216
+                config.observation.encoder.obs_randomizer_kwargs.crop_height = 216
+                config.observation.encoder.obs_randomizer_kwargs.crop_width = 216
 
         elif hdf5_type in ["low_dim", "low_dim_sparse", "low_dim_dense"]:
             if task_name == "transport":
@@ -316,24 +296,24 @@ def modify_config_for_dataset(config, task_name, dataset_type, hdf5_type, base_d
                 ]
                 # handle hierarchical observation configs
                 if config.algo_name == "hbc":
-                    configs_to_set = [
+                    mod_configs_to_set = [
                         config.observation.actor.modalities.obs,
                         config.observation.planner.modalities.obs,
                         config.observation.planner.modalities.subgoal,
                     ]
                 elif config.algo_name == "iris":
-                    configs_to_set = [
+                    mod_configs_to_set = [
                         config.observation.actor.modalities.obs,
                         config.observation.value_planner.planner.modalities.obs,
                         config.observation.value_planner.planner.modalities.subgoal,
                         config.observation.value_planner.value.modalities.obs,
                     ]
                 else:
-                    configs_to_set = [config.observation.modalities.obs]
+                    mod_configs_to_set = [config.observation.modalities.obs]
                 # set all observations / subgoals to use the correct low-dim modalities
-                for obs_key_config in configs_to_set:
-                    obs_key_config.low_dim = list(default_low_dim_obs)
-                    obs_key_config.rgb = []
+                for mod_config in mod_configs_to_set:
+                    mod_config.low_dim = list(default_low_dim_obs)
+                    mod_config.image = []
 
     return config
 
@@ -742,7 +722,7 @@ def generate_experiment_config(
 
     algo_config_name = "bc" if algo_name == "bc_rnn" else algo_name
     config = config_factory(algo_name=algo_config_name)
-    # turn into default config for observation modalities (e.g.: low-dim or rgb)
+    # turn into default config for observation type (low-dim or image)
     config = modifier_for_obs(config)
     # add in config based on the dataset
     config = modify_config_for_dataset(
@@ -1011,13 +991,13 @@ def generate_obs_ablation_configs(
 
     def remove_wrist(config):
         with config.observation.values_unlocked():
-            old_image_mods = list(config.observation.modalities.obs.rgb)
-            config.observation.modalities.obs.rgb = [m for m in old_image_mods if "eye_in_hand" not in m]
+            old_image_mods = list(config.observation.modalities.obs.image)
+            config.observation.modalities.obs.image = [m for m in old_image_mods if "eye_in_hand" not in m]
         return config
 
     def remove_rand(config):
         with config.observation.values_unlocked():
-            config.observation.encoder.rgb.obs_randomizer_class = None
+            config.observation.encoder.obs_randomizer_class = None
         return config
 
     obs_ablation_json_paths = Config() # use for convenient nested dict
@@ -1099,8 +1079,8 @@ def generate_hyper_ablation_configs(
 
     def change_conv(config):
         with config.observation.values_unlocked():
-            config.observation.encoder.rgb.core_class = 'ShallowConv'
-            config.observation.encoder.rgb.core_kwargs = Config()
+            config.observation.encoder.visual_core = 'ShallowConv'
+            config.observation.encoder.visual_core_kwargs = Config()
         return config
 
     def change_rnnd_low_dim(config):
@@ -1185,7 +1165,7 @@ def generate_d4rl_configs(
 
     def cql_algo_config_modifier(config):
         with config.algo.values_unlocked():
-            # taken from TD3-BC settings described in their paper
+            # taken from TD3-BC settings describe in their paper
             config.algo.optim_params.critic.learning_rate.initial = 3e-4
             config.algo.optim_params.actor.learning_rate.initial = 3e-5
             config.algo.actor.bc_start_steps = 40000                        # pre-training steps for actor
@@ -1196,40 +1176,27 @@ def generate_d4rl_configs(
             config.algo.actor.layer_dims = (256, 256, 256)                  # MLP sizes
             config.algo.critic.layer_dims = (256, 256, 256)
         return config
-    
-    def iql_algo_config_modifier(config):
-        with config.algo.values_unlocked():
-            # taken from IQL settings described in their paper
-            config.algo.target_tau = 0.005
-            config.algo.vf_quantile = 0.7
-            config.algo.adv.beta = 3.0
-            config.algo.optim_params.critic.learning_rate.initial = 3e-4
-            config.algo.optim_params.vf.learning_rate.initial = 3e-4
-            config.algo.optim_params.actor.learning_rate.initial = 3e-4
-            config.algo.actor.layer_dims = (256, 256, 256)                  # MLP sizes
-            config.algo.critic.layer_dims = (256, 256, 256)
-        return config
 
     d4rl_tasks = [
-        # "halfcheetah-random-v2",
-        # "hopper-random-v2",
-        # "walker2d-random-v2",
-        "halfcheetah-medium-v2",
-        "hopper-medium-v2",
-        "walker2d-medium-v2",
-        "halfcheetah-expert-v2",
-        "hopper-expert-v2",
-        "walker2d-expert-v2",
-        "halfcheetah-medium-expert-v2",
-        "hopper-medium-expert-v2",
-        "walker2d-medium-expert-v2",
-        # "halfcheetah-medium-replay-v2",
-        # "hopper-medium-replay-v2",
-        # "walker2d-medium-replay-v2",
+        # "halfcheetah-random-v0",
+        # "hopper-random-v0",
+        # "walker2d-random-v0",
+        "halfcheetah-medium-v0",
+        "hopper-medium-v0",
+        "walker2d-medium-v0",
+        "halfcheetah-expert-v0",
+        "hopper-expert-v0",
+        "walker2d-expert-v0",
+        "halfcheetah-medium-expert-v0",
+        "hopper-medium-expert-v0",
+        "walker2d-medium-expert-v0",
+        # "halfcheetah-medium-replay-v0",
+        # "hopper-medium-replay-v0",
+        # "walker2d-medium-replay-v0",
     ]
     d4rl_json_paths = Config() # use for convenient nested dict
     for task_name in d4rl_tasks:
-        for algo_name in ["bcq", "cql", "td3_bc", "iql"]:
+        for algo_name in ["bcq", "cql", "td3_bc"]:
             config = config_factory(algo_name=algo_name)
 
             # hack: copy experiment and train sections from td3-bc, since that has defaults for training with D4RL
@@ -1246,8 +1213,6 @@ def generate_d4rl_configs(
                 config = bcq_algo_config_modifier(config)
             elif algo_name == "cql":
                 config = cql_algo_config_modifier(config)
-            elif algo_name == "iql":
-                config = iql_algo_config_modifier(config)
 
             # set experiment name
             with config.experiment.values_unlocked():
@@ -1255,10 +1220,8 @@ def generate_d4rl_configs(
             # set output folder and dataset
             with config.train.values_unlocked():
                 if base_output_dir is None:
-                    base_output_dir_for_algo = "../{}_trained_models".format(algo_name)
-                else:
-                    base_output_dir_for_algo = base_output_dir
-                config.train.output_dir = os.path.join(base_output_dir_for_algo, "d4rl", algo_name, task_name, "trained_models")
+                    base_output_dir = "../{}_trained_models".format(algo_name)
+                config.train.output_dir = os.path.join(base_output_dir, "d4rl", algo_name, task_name, "trained_models")
                 config.train.data = os.path.join(base_dataset_dir, "d4rl", "converted", 
                     "{}.hdf5".format(task_name.replace("-", "_")))
 

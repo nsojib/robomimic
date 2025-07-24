@@ -15,10 +15,6 @@ help:
 apidoc:
 	@sphinx-apidoc -T --force ../robomimic -o api
 
-# Prepare the HTML files before deploying
-prep:	
-	python prepare_html.py
-
 .PHONY: help Makefile
 
 # Catch-all target: route all unknown targets to Sphinx using the new

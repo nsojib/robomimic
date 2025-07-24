@@ -94,7 +94,7 @@ class TD3_BC(PolicyAlgo, ValueAlgo):
             mlp_layer_dims=self.algo_config.critic.layer_dims,
             value_bounds=self.algo_config.critic.value_bounds,
             goal_shapes=self.goal_shapes,
-            encoder_kwargs=ObsUtils.obs_encoder_kwargs_from_config(self.obs_config.encoder),
+            **ObsNets.obs_encoder_args_from_config(self.obs_config.encoder),
         )
 
         # Q network ensemble and target ensemble
@@ -117,7 +117,7 @@ class TD3_BC(PolicyAlgo, ValueAlgo):
             goal_shapes=self.goal_shapes,
             ac_dim=self.ac_dim,
             mlp_layer_dims=self.algo_config.actor.layer_dims,
-            encoder_kwargs=ObsUtils.obs_encoder_kwargs_from_config(self.obs_config.encoder),
+            **ObsNets.obs_encoder_args_from_config(self.obs_config.encoder),
         )
 
         self.nets["actor"] = actor_class(**actor_args)
@@ -189,9 +189,7 @@ class TD3_BC(PolicyAlgo, ValueAlgo):
             if done_inds.shape[0] > 0:
                 input_batch["rewards"][done_inds] = input_batch["rewards"][done_inds] * (1. / (1. - self.discount))
 
-        # we move to device first before float conversion because image observation modalities will be uint8 -
-        # this minimizes the amount of data transferred to GPU
-        return TensorUtils.to_float(TensorUtils.to_device(input_batch, self.device))
+        return TensorUtils.to_device(TensorUtils.to_float(input_batch), self.device)
 
     def _train_critic_on_batch(self, batch, epoch, no_backprop=False):
         """

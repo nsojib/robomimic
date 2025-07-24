@@ -36,14 +36,6 @@ robomimic.utils.hyperparam\_utils module
    :undoc-members:
    :show-inheritance:
 
-robomimic.utils.lang\_utils module
-----------------------------------
-
-.. automodule:: robomimic.utils.lang_utils
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 robomimic.utils.log\_utils module
 ---------------------------------
 
@@ -64,14 +56,6 @@ robomimic.utils.obs\_utils module
 ---------------------------------
 
 .. automodule:: robomimic.utils.obs_utils
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-robomimic.utils.python\_utils module
-------------------------------------
-
-.. automodule:: robomimic.utils.python_utils
    :members:
    :undoc-members:
    :show-inheritance:
