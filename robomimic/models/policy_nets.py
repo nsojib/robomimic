@@ -866,6 +866,32 @@ class RNNGMMActorNetwork(RNNActorNetwork):
             goal_shapes=goal_shapes,
         )
 
+    def configure_ileed(self, M, remap_ids, device):
+        #ileed rho
+        from numpy import log, inf
+        from torch import randn, no_grad
+        from torch.optim import Adam
+         
+        self.rho = randn(M, 1, requires_grad=True, device=device)
+        self.optim2 = Adam([self.rho], lr=1e-2) 
+        
+        self.remap_ids = remap_ids 
+        print('-------------policy is configured for ILEED -----------------')
+        print("M=", M, "remap_ids=", remap_ids)
+        
+    def update_rho(self):
+        """
+        Update rho parameters using the optimizer.
+        """
+        self.optim2.step()
+        #clip rho between 0 and 1
+        with torch.no_grad():
+            self.rho.clamp_(1e-8, 1)
+        self.optim2.zero_grad()
+
+
+
+
     def _get_output_shapes(self):
         """
         Tells @MIMO_MLP superclass about the output dictionary that should be generated
@@ -893,6 +919,18 @@ class RNNGMMActorNetwork(RNNActorNetwork):
             dists (Distribution): sequence of GMM distributions over the timesteps
             rnn_state: return rnn state at the end if return_state is set to True
         """
+        ### ileed
+        has_operator_id = False
+        if 'operator_id' in obs_dict:
+            # oids= obs_dict['operator_id'].to(torch.int)
+            oids_org = obs_dict['operator_id'].to(torch.int)
+            oids = [self.remap_ids[id] for id in oids_org.data.tolist()]
+            
+            del obs_dict['operator_id']
+            has_operator_id = True
+        
+        
+        
         if self._is_goal_conditioned:
             assert goal_dict is not None
             # repeat the goal observation in time to match dimension with obs_dict
@@ -908,7 +946,12 @@ class RNNGMMActorNetwork(RNNActorNetwork):
             state = None
         
         means = outputs["mean"]
-        scales = outputs["scale"]
+        
+        if has_operator_id: #ileed
+            scales = outputs["scale"]/self.rho[oids].unsqueeze(1).unsqueeze(2)
+        else:
+            scales = outputs["scale"]
+            
         logits = outputs["logits"]
 
         # apply tanh squashing to mean if not using tanh-GMM to ensure means are in [-1, 1]
