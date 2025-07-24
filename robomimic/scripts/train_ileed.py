@@ -175,7 +175,7 @@ def train(config, device):
         if id not in remap_ids.values():
             remap_ids[id]=id 
 
-    model.nets['policy'].configure_ileed(M=6, remap_ids=remap_ids)  #TODO: make M configurable.
+    model.nets['policy'].configure_ileed(M=6, remap_ids=remap_ids, device=device)  #TODO: make M configurable.
 
 
     # main training loop
