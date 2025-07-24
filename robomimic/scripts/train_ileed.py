@@ -41,6 +41,13 @@ from robomimic.config import config_factory
 from robomimic.algo import algo_factory, RolloutPolicy
 from robomimic.utils.log_utils import PrintLogger, DataLogger
 
+def get_run_command():
+    import sys
+    import shlex
+    # reconstruct the command line, properly shell‑quoting each part
+    cmd = " ".join([shlex.quote(sys.executable)] + [shlex.quote(arg) for arg in sys.argv])
+    cwd= os.getcwd()
+    return cmd, cwd
 
 def train(config, device):
     """
@@ -51,9 +58,6 @@ def train(config, device):
     np.random.seed(config.train.seed)
     torch.manual_seed(config.train.seed)
 
-    print("\n============= New Training Run with Config =============")
-    print(config)
-    print("")
     log_dir, ckpt_dir, video_dir = TrainUtils.get_exp_dir(config)
 
     if config.experiment.logging.terminal_output_to_txt:
@@ -61,6 +65,20 @@ def train(config, device):
         logger = PrintLogger(os.path.join(log_dir, 'log.txt'))
         sys.stdout = logger
         sys.stderr = logger
+
+    print("\n----------------------run info----------------------")
+    cmd, cwd = get_run_command() 
+    print(f"cmd = {cmd}")
+    print(f"cwd = {cwd}")
+    print(f"hostname = {socket.gethostname()}")
+    print(f"pid = {os.getpid()}")
+    print(f"python version = {sys.version}")
+    print('------------------------------------------------------\n')
+
+    print("\n============= New Training Run with Config =============")
+    print(config)
+    print("")
+
 
     # read config to set up metadata for observation types (e.g. detecting image observations)
     ObsUtils.initialize_obs_utils_with_config(config)
