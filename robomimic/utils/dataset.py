@@ -87,6 +87,8 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.hdf5_normalize_obs = hdf5_normalize_obs
         self._hdf5_file = None
 
+        self.ileed = False
+
         assert hdf5_cache_mode in ["all", "low_dim", None]
         self.hdf5_cache_mode = hdf5_cache_mode
 
@@ -152,6 +154,47 @@ class SequenceDataset(torch.utils.data.Dataset):
             self.hdf5_cache = None
 
         self.close_and_delete_hdf5_handle()
+
+
+    def ileed_load_operator_indices(self):
+        # self.hdf5_file['mask'].keys() 
+        operator_keys = ['better_operator_1', 'better_operator_2', 'okay_operator_1', 'okay_operator_2' , 'worse_operator_1', 'worse_operator_2']
+        
+        print("------------------------------ operator_keys -------------------------------")
+        print(operator_keys)
+        print('----------------------------------------------------------------------------')
+
+        demo_name2_operator_id = {}
+        for operator_id, operator in enumerate(operator_keys):
+            operator_demos = [b.decode('utf-8') for b in self.hdf5_file['mask'][operator]]
+            for demo_name in operator_demos:
+                demo_name2_operator_id[demo_name] = operator_id
+                
+        index_to_operator_id = [demo_name2_operator_id[self._index_to_demo_id[i]] for i in range(len(self))]
+        
+        self.demo_name2_operator_id = demo_name2_operator_id
+        self.index_to_operator_id = index_to_operator_id
+        self.ileed = True
+        
+        # id remapping to deal with operator_4, operator_5 when M=4
+        used_ids = np.unique( self.index_to_operator_id  )
+        valid_ids = range(len(used_ids))
+        invalid_ids =  [i for i in used_ids if i not in valid_ids]
+        unused_ids = set( valid_ids ) - set(used_ids )
+
+        remap_ids = {k:v for k, v in zip(invalid_ids, unused_ids)  }
+        for id in valid_ids:
+            if id not in remap_ids.values():
+                remap_ids[id]=id 
+        self.remap_ids = remap_ids
+        
+        print("------------------------------loading ileed operator indices -------------------------------")
+        print("remap: ", remap_ids)
+        print('---------------------------------------------------------------------------------------------')
+
+
+
+
 
     def load_demo_info(self, filter_by_attribute=None, demos=None):
         """
@@ -468,6 +511,9 @@ class SequenceDataset(torch.utils.data.Dataset):
             if self.hdf5_normalize_obs:
                 goal = ObsUtils.normalize_obs(goal, obs_normalization_stats=self.obs_normalization_stats)
             meta["goal_obs"] = {k: goal[k][0] for k in goal}  # remove sequence dimension for goal
+
+        if self.ileed:
+            meta['obs']['operator_id'] = self.index_to_operator_id[index]
 
         return meta
 
