@@ -494,4 +494,8 @@ if __name__ == "__main__":
 #     --expert_ids /home/carl/offline_study/robomimic/robomimic/scripts/expert_ids/expert_ids_square_mh_lowdim.txt
     
     
+# python train_ileed.py \
+#     --config /home/carl/offline_study/robomimic/configs/subopt/square/mh/worse_better/low_dim/bc_rnn.json\
+#     --expert_ids /home/carl/offline_study/robomimic/robomimic/scripts/expert_ids/expert_ids_square_mh_lowdim.txt
+    
     
