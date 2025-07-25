@@ -156,19 +156,8 @@ class SequenceDataset(torch.utils.data.Dataset):
         self.close_and_delete_hdf5_handle()
 
 
-    def ileed_load_operator_indices(self):
-        # self.hdf5_file['mask'].keys() 
-        operator_keys = ['better_operator_1', 'better_operator_2', 'okay_operator_1', 'okay_operator_2' , 'worse_operator_1', 'worse_operator_2']
+    def ileed_load_operator_indices(self, demo_name2_operator_id):
         
-        print("------------------------------ operator_keys -------------------------------")
-        print(operator_keys)
-        print('----------------------------------------------------------------------------')
-
-        demo_name2_operator_id = {}
-        for operator_id, operator in enumerate(operator_keys):
-            operator_demos = [b.decode('utf-8') for b in self.hdf5_file['mask'][operator]]
-            for demo_name in operator_demos:
-                demo_name2_operator_id[demo_name] = operator_id
                 
         index_to_operator_id = [demo_name2_operator_id[self._index_to_demo_id[i]] for i in range(len(self))]
         

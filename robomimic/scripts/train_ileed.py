@@ -41,6 +41,22 @@ from robomimic.config import config_factory
 from robomimic.algo import algo_factory, RolloutPolicy
 from robomimic.utils.log_utils import PrintLogger, DataLogger
 
+
+# load the expert ids as a dictionary
+def load_expert_ids(file_path):
+    expert_ids = {}
+    dataset_path = None
+    with open(file_path, 'r') as f:
+        #first line is the dataset path
+        first_line = f.readline().strip()
+        if first_line.startswith("dataset_path:"):
+            dataset_path = first_line.split(":")[1].strip()
+        # subsequent lines are demo_name:operator_id
+        for line in f: 
+            demo_name, operator_id = line.strip().split(':')
+            expert_ids[demo_name] = int(operator_id)
+    return expert_ids, dataset_path
+
 def get_run_command():
     import sys
     import shlex
@@ -49,14 +65,15 @@ def get_run_command():
     cwd= os.getcwd()
     return cmd, cwd
 
-def train(config, device):
+def train(config, expert_ids, device):
     """
     Train a model using the algorithm.
     """
-
+     
     # first set seeds
     np.random.seed(config.train.seed)
     torch.manual_seed(config.train.seed)
+
 
     log_dir, ckpt_dir, video_dir = TrainUtils.get_exp_dir(config)
 
@@ -65,6 +82,7 @@ def train(config, device):
         logger = PrintLogger(os.path.join(log_dir, 'log.txt'))
         sys.stdout = logger
         sys.stderr = logger
+
 
     print("\n----------------------run info----------------------")
     cmd, cwd = get_run_command() 
@@ -75,9 +93,17 @@ def train(config, device):
     print(f"python version = {sys.version}")
     print('------------------------------------------------------\n')
 
+
+    M=len( set(expert_ids.values()) ) #number of total operators in the dataset.
+    #based on filterkey, actual used operators are a subset of M.
+    print(f"Total number of operators in dataset: M={M}")
+
+
+
     print("\n============= New Training Run with Config =============")
     print(config)
     print("")
+
 
 
     # read config to set up metadata for observation types (e.g. detecting image observations)
@@ -164,7 +190,7 @@ def train(config, device):
         drop_last=True
     )
     
-    trainset.ileed_load_operator_indices()
+    trainset.ileed_load_operator_indices(expert_ids)
 
     if config.experiment.validate:
         # cap num workers for validation dataset at 1
@@ -183,17 +209,17 @@ def train(config, device):
 
 
     #ileed
-    used_ids = np.unique( trainset.index_to_operator_id  )
-    valid_ids = range(len(used_ids))
-    invalid_ids =  [i for i in used_ids if i not in valid_ids]
-    unused_ids = set( valid_ids ) - set(used_ids )
+    # used_ids = np.unique( trainset.index_to_operator_id  )
+    # valid_ids = range(len(used_ids))
+    # invalid_ids =  [i for i in used_ids if i not in valid_ids]
+    # unused_ids = set( valid_ids ) - set(used_ids )
 
-    remap_ids = {k:v for k, v in zip(invalid_ids, unused_ids)  }
-    for id in valid_ids:
-        if id not in remap_ids.values():
-            remap_ids[id]=id 
+    # remap_ids = {k:v for k, v in zip(invalid_ids, unused_ids)  }
+    # for id in valid_ids:
+    #     if id not in remap_ids.values():
+    #         remap_ids[id]=id 
 
-    model.nets['policy'].configure_ileed(M=6, remap_ids=remap_ids, device=device)  #TODO: make M configurable.
+    model.nets['policy'].configure_ileed(M=M, remap_ids=trainset.remap_ids, device=device)  
 
 
     # main training loop
@@ -387,11 +413,18 @@ def main(args):
 
     # lock config to prevent further modifications and ensure missing keys raise errors
     config.lock()
+    
+    
+    expert_ids , dataset_path= load_expert_ids(args.expert_ids)
+    print(f"Loaded {len(expert_ids)} expert IDs from file.")
+    print(f"Expert ids dataset path: {dataset_path}")
+    print(f"Example expert ID: {list(expert_ids.items())[0]}")
+    
 
     # catch error during training and print it
     res_str = "finished run successfully!"
     try:
-        train(config, device=device)
+        train(config, expert_ids, device=device)
     except Exception as e:
         res_str = "run failed with error:\n{}\n\n{}".format(e, traceback.format_exc())
     print(res_str)
@@ -407,6 +440,13 @@ if __name__ == "__main__":
         default=None,
         help="(optional) path to a config json that will be used to override the default settings. \
             If omitted, default settings are used. This is the preferred way to run experiments.",
+    )
+    
+    parser.add_argument(
+        "--expert_ids",
+        type=str,
+        required=True,
+        help="(required) demo_name:expert_id file"
     )
 
     # Algorithm Name
@@ -443,4 +483,15 @@ if __name__ == "__main__":
     main(args)
 
 
-    # python train_ileed.py --config configs/core/can/mh/low_dim/bc_rnn.json
+    # python train_ileed.py --config /home/carl/offline_study/robomimic/configs/core/square/mh/low_dim/bc_rnn.json
+    
+    # python train.py --config /home/carl/offline_study/robomimic/configs/core/can/mh/low_dim/bc_rnn.json
+    # python train_ileed.py --config /home/carl/offline_study/robomimic/configs/core/can/mh/low_dim/bc_rnn.json
+    
+    
+# python train_ileed.py \
+#     --config /home/carl/offline_study/robomimic/configs/core/square/mh/low_dim/bc_rnn.json \
+#     --expert_ids /home/carl/offline_study/robomimic/robomimic/scripts/expert_ids/expert_ids_square_mh_lowdim.txt
+    
+    
+    
