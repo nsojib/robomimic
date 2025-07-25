@@ -166,6 +166,12 @@ def train(config, expert_ids, device):
     print("\n============= Model Summary =============")
     print(model)  # print model summary
     print("")
+    
+    
+    # save the config as a json file
+    with open(os.path.join(log_dir, '..', 'config.json'), 'w') as outfile:
+        json.dump(config, outfile, indent=4)
+    
 
     # load training data
     trainset, validset = TrainUtils.load_data_for_training(
