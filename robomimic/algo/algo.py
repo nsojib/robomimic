@@ -45,7 +45,7 @@ def algo_name_to_factory_func(algo_name):
     return REGISTERED_ALGO_FACTORY_FUNCS[algo_name]
 
 
-def algo_factory(algo_name, config, modality_shapes, ac_dim, device):
+def algo_factory(algo_name, config, obs_key_shapes, ac_dim, device):
     """
     Factory function for creating algorithms based on the algorithm name and config.
 
@@ -54,7 +54,7 @@ def algo_factory(algo_name, config, modality_shapes, ac_dim, device):
 
         config (BaseConfig instance): config object
 
-        modality_shapes (OrderedDict): dictionary that maps modality keys to shapes
+        obs_key_shapes (OrderedDict): dictionary that maps observation keys to shapes
 
         ac_dim (int): dimension of action space
 
@@ -73,7 +73,7 @@ def algo_factory(algo_name, config, modality_shapes, ac_dim, device):
         algo_config=config.algo,
         obs_config=config.observation,
         global_config=config,
-        modality_shapes=modality_shapes,
+        obs_key_shapes=obs_key_shapes,
         ac_dim=ac_dim,
         device=device,
         **algo_kwargs
@@ -92,7 +92,7 @@ class Algo(object):
         algo_config,
         obs_config,
         global_config,
-        modality_shapes,
+        obs_key_shapes,
         ac_dim,
         device
     ):
@@ -106,7 +106,7 @@ class Algo(object):
 
             global_config (Config object): global training config
 
-            modality_shapes (OrderedDict): dictionary that maps modality keys to shapes
+            obs_key_shapes (OrderedDict): dictionary that maps observation keys to shapes
 
             ac_dim (int): dimension of action space
 
@@ -119,36 +119,39 @@ class Algo(object):
 
         self.ac_dim = ac_dim
         self.device = device
-        self.modality_shapes = modality_shapes
+        self.obs_key_shapes = obs_key_shapes
 
         self.nets = nn.ModuleDict()
-        self._create_shapes(obs_config.modalities, modality_shapes)
+        self._create_shapes(obs_config.modalities, obs_key_shapes)
         self._create_networks()
         self._create_optimizers()
         assert isinstance(self.nets, nn.ModuleDict)
 
-    def _create_shapes(self, modalities, modality_shapes):
+    def _create_shapes(self, obs_keys, obs_key_shapes):
         """
         Create obs_shapes, goal_shapes, and subgoal_shapes dictionaries, to make it
-        easy for this algorithm object to keep track of modality shapes. Each dictionary
-        maps modality to shape.
+        easy for this algorithm object to keep track of observation key shapes. Each dictionary
+        maps observation key to shape.
 
         Args:
-            modalities (dict): dict of required modalities for this training run (usually 
-                specified by the obs config), e.g., {"obs": ["image", "proprio"], "goal": ["proprio"]}
-            modality_shapes (dict): dict of modality shapes, e.g., {"image": [3, 224, 224]}
+            obs_keys (dict): dict of required observation keys for this training run (usually
+                specified by the obs config), e.g., {"obs": ["rgb", "proprio"], "goal": ["proprio"]}
+            obs_key_shapes (dict): dict of observation key shapes, e.g., {"rgb": [3, 224, 224]}
         """
         # determine shapes
         self.obs_shapes = OrderedDict()
         self.goal_shapes = OrderedDict()
         self.subgoal_shapes = OrderedDict()
-        for k in modality_shapes:
-            if "obs" in self.obs_config.modalities and k in (self.obs_config.modalities.obs.low_dim + self.obs_config.modalities.obs.image):
-                self.obs_shapes[k] = modality_shapes[k]
-            if "goal" in self.obs_config.modalities and k in (self.obs_config.modalities.goal.low_dim + self.obs_config.modalities.goal.image):
-                self.goal_shapes[k] = modality_shapes[k]
-            if "subgoal" in self.obs_config.modalities and k in (self.obs_config.modalities.subgoal.low_dim + self.obs_config.modalities.subgoal.image):
-                self.subgoal_shapes[k] = modality_shapes[k]
+
+        # We check across all modality groups (obs, goal, subgoal), and see if the inputted observation key exists
+        # across all modalitie specified in the config. If so, we store its corresponding shape internally
+        for k in obs_key_shapes:
+            if "obs" in self.obs_config.modalities and k in [obs_key for modality in self.obs_config.modalities.obs.values() for obs_key in modality]:
+                self.obs_shapes[k] = obs_key_shapes[k]
+            if "goal" in self.obs_config.modalities and k in [obs_key for modality in self.obs_config.modalities.goal.values() for obs_key in modality]:
+                self.goal_shapes[k] = obs_key_shapes[k]
+            if "subgoal" in self.obs_config.modalities and k in [obs_key for modality in self.obs_config.modalities.subgoal.values() for obs_key in modality]:
+                self.subgoal_shapes[k] = obs_key_shapes[k]
 
     def _create_networks(self):
         """
@@ -196,6 +199,51 @@ class Algo(object):
             input_batch (dict): processed and filtered batch that
                 will be used for training 
         """
+        return batch
+
+    def postprocess_batch_for_training(self, batch, obs_normalization_stats):
+        """
+        Does some operations (like channel swap, uint8 to float conversion, normalization)
+        after @process_batch_for_training is called, in order to ensure these operations
+        take place on GPU.
+
+        Args:
+            batch (dict): dictionary with torch.Tensors sampled
+                from a data loader. Assumed to be on the device where
+                training will occur (after @process_batch_for_training
+                is called)
+
+            obs_normalization_stats (dict or None): if provided, this should map observation 
+                keys to dicts with a "mean" and "std" of shape (1, ...) where ... is the 
+                default shape for the observation.
+
+        Returns:
+            batch (dict): postproceesed batch
+        """
+
+        # ensure obs_normalization_stats are torch Tensors on proper device
+        obs_normalization_stats = TensorUtils.to_float(TensorUtils.to_device(TensorUtils.to_tensor(obs_normalization_stats), self.device))
+
+        # we will search the nested batch dictionary for the following special batch dict keys
+        # and apply the processing function to their values (which correspond to observations)
+        obs_keys = ["obs", "next_obs", "goal_obs"]
+
+        def recurse_helper(d):
+            """
+            Apply process_obs_dict to values in nested dictionary d that match a key in obs_keys.
+            """
+            for k in d:
+                if k in obs_keys:
+                    # found key - stop search and process observation
+                    if d[k] is not None:
+                        d[k] = ObsUtils.process_obs_dict(d[k])
+                        if obs_normalization_stats is not None:
+                            d[k] = ObsUtils.normalize_obs(d[k], obs_normalization_stats=obs_normalization_stats)
+                elif isinstance(d[k], dict):
+                    # search down into dictionary
+                    recurse_helper(d[k])
+
+        recurse_helper(batch)
         return batch
 
     def train_on_batch(self, batch, epoch, validate=False):
@@ -424,7 +472,7 @@ class RolloutPolicy(object):
             policy (Algo instance): @Algo object to wrap to prepare for rollouts
 
             obs_normalization_stats (dict): optionally pass a dictionary for observation
-                normalization. This should map observation modality keys to dicts
+                normalization. This should map observation keys to dicts
                 with a "mean" and "std" of shape (1, ...) where ... is the default
                 shape for the observation.
         """
@@ -446,12 +494,16 @@ class RolloutPolicy(object):
             ob (dict): single observation dictionary from environment (no batch dimension, 
                 and np.array values for each key)
         """
-        if self.obs_normalization_stats is not None:
-            ob = ObsUtils.normalize_obs(ob, obs_normalization_stats=self.obs_normalization_stats)
         ob = TensorUtils.to_tensor(ob)
         ob = TensorUtils.to_batch(ob)
         ob = TensorUtils.to_device(ob, self.policy.device)
         ob = TensorUtils.to_float(ob)
+        if self.obs_normalization_stats is not None:
+            # ensure obs_normalization_stats are torch Tensors on proper device
+            obs_normalization_stats = TensorUtils.to_float(TensorUtils.to_device(TensorUtils.to_tensor(self.obs_normalization_stats), self.policy.device))
+            # limit normalization to obs keys being used, in case environment includes extra keys
+            ob = { k : ob[k] for k in self.policy.global_config.all_obs_keys }
+            ob = ObsUtils.normalize_obs(ob, obs_normalization_stats=obs_normalization_stats)
         return ob
 
     def __repr__(self):

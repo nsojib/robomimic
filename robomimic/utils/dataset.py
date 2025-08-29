@@ -129,7 +129,7 @@ class SequenceDataset(torch.utils.data.Dataset):
                 # only store low-dim observations
                 obs_keys_in_memory = []
                 for k in self.obs_keys:
-                    if not (ObsUtils.key_is_image(k)):
+                    if ObsUtils.key_is_obs_modality(k, "low_dim"):
                         obs_keys_in_memory.append(k)
             self.obs_keys_in_memory = obs_keys_in_memory
 
@@ -316,9 +316,9 @@ class SequenceDataset(torch.utils.data.Dataset):
             all_data[ep]["attrs"] = {}
             all_data[ep]["attrs"]["num_samples"] = hdf5_file["data/{}".format(ep)].attrs["num_samples"]
             # get obs
-            all_data[ep]["obs"] = {k: hdf5_file["data/{}/obs/{}".format(ep, k)][()].astype('float32') for k in obs_keys}
+            all_data[ep]["obs"] = {k: hdf5_file["data/{}/obs/{}".format(ep, k)][()] for k in obs_keys}
             if load_next_obs:
-                all_data[ep]["next_obs"] = {k: hdf5_file["data/{}/next_obs/{}".format(ep, k)][()].astype('float32') for k in obs_keys}
+                all_data[ep]["next_obs"] = {k: hdf5_file["data/{}/next_obs/{}".format(ep, k)][()] for k in obs_keys}
             # get other dataset keys
             for k in dataset_keys:
                 if k in hdf5_file["data/{}".format(ep)]:
@@ -368,30 +368,30 @@ class SequenceDataset(torch.utils.data.Dataset):
         # with the previous statistics.
         ep = self.demos[0]
         obs_traj = {k: self.hdf5_file["data/{}/obs/{}".format(ep, k)][()].astype('float32') for k in self.obs_keys}
-        obs_traj = ObsUtils.process_obs(obs_traj)
+        obs_traj = ObsUtils.process_obs_dict(obs_traj)
         merged_stats = _compute_traj_stats(obs_traj)
         print("SequenceDataset: normalizing observations...")
         for ep in LogUtils.custom_tqdm(self.demos[1:]):
             obs_traj = {k: self.hdf5_file["data/{}/obs/{}".format(ep, k)][()].astype('float32') for k in self.obs_keys}
-            obs_traj = ObsUtils.process_obs(obs_traj)
+            obs_traj = ObsUtils.process_obs_dict(obs_traj)
             traj_stats = _compute_traj_stats(obs_traj)
             merged_stats = _aggregate_traj_stats(merged_stats, traj_stats)
 
         obs_normalization_stats = { k : {} for k in merged_stats }
         for k in merged_stats:
             # note we add a small tolerance of 1e-3 for std
-            obs_normalization_stats[k]["mean"] = merged_stats[k]["mean"]
-            obs_normalization_stats[k]["std"] = np.sqrt(merged_stats[k]["sqdiff"] / merged_stats[k]["n"]) + 1e-3
+            obs_normalization_stats[k]["mean"] = merged_stats[k]["mean"].astype(np.float32)
+            obs_normalization_stats[k]["std"] = (np.sqrt(merged_stats[k]["sqdiff"] / merged_stats[k]["n"]) + 1e-3).astype(np.float32)
         return obs_normalization_stats
 
     def get_obs_normalization_stats(self):
         """
-        Returns dictionary of mean and std for each observation modality if using
+        Returns dictionary of mean and std for each observation key if using
         observation normalization, otherwise None.
 
         Returns:
             obs_normalization_stats (dict): a dictionary for observation
-                normalization. This maps observation modality keys to dicts
+                normalization. This maps observation keys to dicts
                 with a "mean" and "std" of shape (1, ...) where ... is the default
                 shape for the observation.
         """
@@ -457,6 +457,7 @@ class SequenceDataset(torch.utils.data.Dataset):
             demo_id,
             index_in_demo=index_in_demo,
             keys=self.dataset_keys,
+            num_frames_to_stack=self.n_frame_stack - 1, # note: need to decrement self.n_frame_stack by one
             seq_length=self.seq_length
         )
 
@@ -473,8 +474,6 @@ class SequenceDataset(torch.utils.data.Dataset):
             seq_length=self.seq_length,
             prefix="obs"
         )
-        if self.hdf5_normalize_obs:
-            meta["obs"] = ObsUtils.normalize_obs(meta["obs"], obs_normalization_stats=self.obs_normalization_stats)
 
         if self.load_next_obs:
             meta["next_obs"] = self.get_obs_sequence_from_demo(
@@ -485,8 +484,6 @@ class SequenceDataset(torch.utils.data.Dataset):
                 seq_length=self.seq_length,
                 prefix="next_obs"
             )
-            if self.hdf5_normalize_obs:
-                meta["next_obs"] = ObsUtils.normalize_obs(meta["next_obs"], obs_normalization_stats=self.obs_normalization_stats)
 
         if goal_index is not None:
             goal = self.get_obs_sequence_from_demo(
@@ -497,12 +494,7 @@ class SequenceDataset(torch.utils.data.Dataset):
                 seq_length=1,
                 prefix="next_obs",
             )
-            if self.hdf5_normalize_obs:
-                goal = ObsUtils.normalize_obs(goal, obs_normalization_stats=self.obs_normalization_stats)
             meta["goal_obs"] = {k: goal[k][0] for k in goal}  # remove sequence dimension for goal
-
-        if self.ileed:
-            meta['obs']['operator_id'] = self.index_to_operator_id[index]
 
         return meta
 
@@ -544,11 +536,11 @@ class SequenceDataset(torch.utils.data.Dataset):
         seq = dict()
         for k in keys:
             data = self.get_dataset_for_ep(demo_id, k)
-            seq[k] = data[seq_begin_index: seq_end_index].astype("float32")
+            seq[k] = data[seq_begin_index: seq_end_index]
 
         seq = TensorUtils.pad_sequence(seq, padding=(seq_begin_pad, seq_end_pad), pad_same=True)
         pad_mask = np.array([0] * seq_begin_pad + [1] * (seq_end_index - seq_begin_index) + [0] * seq_end_pad)
-        pad_mask = pad_mask[:, None].astype(np.bool)
+        pad_mask = pad_mask[:, None].astype(bool)
 
         return seq, pad_mask
 
@@ -578,10 +570,9 @@ class SequenceDataset(torch.utils.data.Dataset):
         if self.get_pad_mask:
             obs["pad_mask"] = pad_mask
 
-        # prepare image observations from dataset
-        return ObsUtils.process_obs(obs)
+        return obs
 
-    def get_dataset_sequence_from_demo(self, demo_id, index_in_demo, keys, seq_length=1):
+    def get_dataset_sequence_from_demo(self, demo_id, index_in_demo, keys, num_frames_to_stack=0, seq_length=1):
         """
         Extract a (sub)sequence of dataset items from a demo given the @keys of the items (e.g., states, actions).
         
@@ -589,6 +580,7 @@ class SequenceDataset(torch.utils.data.Dataset):
             demo_id (str): id of the demo, e.g., demo_0
             index_in_demo (int): beginning index of the sequence wrt the demo
             keys (tuple): list of keys to extract
+            num_frames_to_stack (int): numbers of frame to stack. Seq gets prepended with repeated items if out of range
             seq_length (int): sequence length to extract. Seq gets post-pended with repeated items if out of range
 
         Returns:
@@ -598,7 +590,7 @@ class SequenceDataset(torch.utils.data.Dataset):
             demo_id,
             index_in_demo=index_in_demo,
             keys=keys,
-            num_frames_to_stack=0,  # don't frame stack for meta keys
+            num_frames_to_stack=num_frames_to_stack,
             seq_length=seq_length,
         )
         if self.get_pad_mask:
@@ -617,6 +609,7 @@ class SequenceDataset(torch.utils.data.Dataset):
             demo_id,
             index_in_demo=0,
             keys=self.dataset_keys,
+            num_frames_to_stack=self.n_frame_stack - 1, # note: need to decrement self.n_frame_stack by one
             seq_length=demo_length
         )
         meta["obs"] = self.get_obs_sequence_from_demo(

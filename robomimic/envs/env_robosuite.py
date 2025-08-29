@@ -6,14 +6,54 @@ with metadata present in datasets.
 import json
 import numpy as np
 from copy import deepcopy
+import open3d as o3d
 
-import mujoco_py
 import robosuite
-from robosuite.utils.mjcf_utils import postprocess_model_xml
+from robosuite.utils.camera_utils import get_real_depth_map, get_camera_extrinsic_matrix, get_camera_intrinsic_matrix
+try:
+    # this is needed for ensuring robosuite can find the additional mimicgen environments (see https://mimicgen.github.io)
+    import mimicgen_envs
+except ImportError:
+    pass
 
 import robomimic.utils.obs_utils as ObsUtils
 import robomimic.envs.env_base as EB
 
+# protect against missing mujoco-py module, since robosuite might be using mujoco-py or DM backend
+try:
+    import mujoco_py
+    MUJOCO_EXCEPTIONS = [mujoco_py.builder.MujocoException]
+except ImportError:
+    MUJOCO_EXCEPTIONS = []
+
+def depth2fgpcd(depth, mask, cam_params):
+    # depth: (h, w)
+    # fgpcd: (n, 3)
+    # mask: (h, w)
+    h, w = depth.shape
+    mask = np.logical_and(mask, depth > 0)
+    # mask = (depth <= 0.599/0.8)
+    fgpcd = np.zeros((mask.sum(), 3))
+    fx, fy, cx, cy = cam_params
+    pos_x, pos_y = np.meshgrid(np.arange(w), np.arange(h))
+    pos_x = pos_x[mask]
+    pos_y = pos_y[mask]
+    fgpcd[:, 0] = (pos_x - cx) * depth[mask] / fx
+    fgpcd[:, 1] = (pos_y - cy) * depth[mask] / fy
+    fgpcd[:, 2] = depth[mask]
+    return fgpcd
+
+def np2o3d(pcd, color=None):
+    # pcd: (n, 3)
+    # color: (n, 3)
+    pcd_o3d = o3d.geometry.PointCloud()
+    pcd_o3d.points = o3d.utility.Vector3dVector(pcd)
+    if color is not None and color.shape[0] > 0:
+        assert pcd.shape[0] == color.shape[0]
+        assert color.max() <= 1
+        assert color.min() >= 0
+        pcd_o3d.colors = o3d.utility.Vector3dVector(color)
+    return pcd_o3d
 
 class EnvRobosuite(EB.EnvBase):
     """Wrapper class for robosuite environments (https://github.com/ARISE-Initiative/robosuite)"""
@@ -49,7 +89,7 @@ class EnvRobosuite(EB.EnvBase):
         # robosuite version check
         self._is_v1 = (robosuite.__version__.split(".")[0] == "1")
         if self._is_v1:
-            assert (robosuite.__version__.split(".")[1] == "2"), "only support robosuite v0.3 and v1.2+"
+            assert (int(robosuite.__version__.split(".")[1]) >= 2), "only support robosuite v0.3 and v1.2+"
 
         kwargs = deepcopy(kwargs)
 
@@ -60,7 +100,7 @@ class EnvRobosuite(EB.EnvBase):
             ignore_done=True,
             use_object_obs=True,
             use_camera_obs=use_image_obs,
-            camera_depths=False,
+            camera_depths=True,
         )
         kwargs.update(update_kwargs)
 
@@ -87,6 +127,31 @@ class EnvRobosuite(EB.EnvBase):
             for ob_name in self.env.observation_names:
                 if ("joint_pos" in ob_name) or ("eef_vel" in ob_name):
                     self.env.modify_observable(observable_name=ob_name, attribute="active", modifier=True)
+
+        voxel_center = np.array([0, 0, 0.7])
+        pc_center = np.array([0, 0, 0.7])
+        if hasattr(self.env, 'table_offset'):
+            voxel_center[:2] = self.env.table_offset[:2]
+            pc_center = np.array(self.env.table_offset)
+            pc_center[2] = pc_center[2] + 0.02
+        self.ws_size = 0.6
+        if env_name.startswith('Kitchen_'):
+            self.ws_size = 0.7
+            pc_center = self.env.table_offset
+        elif env_name.startswith('PickPlace_'):
+            pc_center = np.array([0, 0, 0.83])
+            self.ws_size = 1.1
+
+        self.voxel_workspace = np.array([
+            [voxel_center[0] - self.ws_size/2, voxel_center[0] + self.ws_size/2],
+            [voxel_center[1] - self.ws_size/2, voxel_center[1] + self.ws_size/2],
+            [voxel_center[2], voxel_center[2] + self.ws_size]
+        ])
+        self.pc_workspace = np.array([
+            [pc_center[0] - self.ws_size/2, pc_center[0] + self.ws_size/2],
+            [pc_center[1] - self.ws_size/2, pc_center[1] + self.ws_size/2],
+            [pc_center[2], pc_center[2] + self.ws_size]
+        ])
 
     def step(self, action):
         """
@@ -131,7 +196,13 @@ class EnvRobosuite(EB.EnvBase):
         should_ret = False
         if "model" in state:
             self.reset()
-            xml = postprocess_model_xml(state["model"])
+            robosuite_version_id = int(robosuite.__version__.split(".")[1])
+            if robosuite_version_id <= 3:
+                from robosuite.utils.mjcf_utils import postprocess_model_xml
+                xml = postprocess_model_xml(state["model"])
+            else:
+                # v1.4 and above use the class-based edit_model_xml function
+                xml = self.env.edit_model_xml(state["model"])
             self.env.reset_from_xml_string(xml)
             self.env.sim.reset()
             if not self._is_v1:
@@ -181,13 +252,144 @@ class EnvRobosuite(EB.EnvBase):
             di = self.env._get_observations(force_update=True) if self._is_v1 else self.env._get_observation()
         ret = {}
         for k in di:
-            if ObsUtils.key_is_image(k):
+            if (k in ObsUtils.OBS_KEYS_TO_MODALITIES) and ObsUtils.key_is_obs_modality(key=k, obs_modality="rgb"):
                 ret[k] = di[k][::-1]
                 if self.postprocess_visual_obs:
-                    ret[k] = ObsUtils.process_image(ret[k])
+                    ret[k] = ObsUtils.process_obs(obs=ret[k], obs_key=k)
+            if (k in ObsUtils.OBS_KEYS_TO_MODALITIES) and ObsUtils.key_is_obs_modality(key=k, obs_modality="depth"):
+                depth_map = di[k][::-1]
+                depth_map = np.clip(depth_map, 0, 1)
+                ret[k] = get_real_depth_map(self.env.sim, depth_map)
+                if self.postprocess_visual_obs:
+                    ret[k] = ObsUtils.process_obs(obs=ret[k], obs_key=k)
 
         # "object" key contains object information
         ret["object"] = np.array(di["object-state"])
+
+        if self.env.use_camera_obs:
+            workspace = self.voxel_workspace
+
+            # voxel_bound = np.array([
+            #     [center[0] - ws_size/2, center[1] - ws_size/2, center[2] - 0.05],
+            #     [center[0] + ws_size/2, center[1] + ws_size/2, center[2] - 0.05 + ws_size],
+            # ])
+            voxel_bound = workspace.T
+            voxel_size = 64
+
+            all_pcds = o3d.geometry.PointCloud()
+            for cam_idx, camera_name in enumerate(self.env.camera_names):
+                cam_height = self.env.camera_heights[cam_idx]
+                cam_width = self.env.camera_widths[cam_idx]
+                ext_mat = get_camera_extrinsic_matrix(self.env.sim, camera_name)
+                int_mat = get_camera_intrinsic_matrix(self.env.sim, camera_name, cam_height, cam_width)
+                depth = di[f'{camera_name}_depth'][::-1]
+                depth = np.clip(depth, 0, 1)
+                depth = get_real_depth_map(self.env.sim, depth)
+                depth = depth[:, :, 0]
+                color = di[f'{camera_name}_image'][::-1]
+                # depth = ret[f'{camera_name}_depth'][:, :, 0]
+                # color = ret[f'{camera_name}_image']
+                # if camera_name != 'agentview':
+                #     del ret[f'{camera_name}_depth']
+                #     del ret[f'{camera_name}_image']
+                cam_param = [int_mat[0, 0], int_mat[1, 1], int_mat[0, 2], int_mat[1, 2]]
+                mask = np.ones_like(depth, dtype=bool)
+                pcd = depth2fgpcd(depth, mask, cam_param)
+
+                # pose = np.linalg.inv(ext_mat)
+                pose = ext_mat
+                
+                trans_pcd = pose @ np.concatenate([pcd.T, np.ones((1, pcd.shape[0]))], axis=0)
+                trans_pcd = trans_pcd[:3, :].T
+
+                mask = (trans_pcd[:, 0] > workspace[0, 0]) * (trans_pcd[:, 0] < workspace[0, 1]) * (trans_pcd[:, 1] > workspace[1, 0]) * (trans_pcd[:, 1] < workspace[1, 1]) * (trans_pcd[:, 2] > workspace[2, 0]) * (trans_pcd[:, 2] < workspace[2, 1])
+
+                pcd_o3d = np2o3d(trans_pcd[mask], color.reshape(-1, 3)[mask].astype(np.float64) / 255)
+
+                all_pcds += pcd_o3d
+
+            voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud_within_bounds(all_pcds, voxel_size=self.ws_size/voxel_size+1e-4, min_bound=voxel_bound[0], max_bound=voxel_bound[1])
+            voxels = voxel_grid.get_voxels()  # returns list of voxels
+            if len(voxels) == 0:
+                np_voxels = np.zeros([4, voxel_size, voxel_size, voxel_size], dtype=np.uint8)
+            else:
+                indices = np.stack(list(vx.grid_index for vx in voxels))
+                colors = np.stack(list(vx.color for vx in voxels))
+
+                mask = (indices > 0) * (indices < voxel_size)
+                indices = indices[mask.all(axis=1)]
+                colors = colors[mask.all(axis=1)]
+
+                np_voxels = np.zeros([4, voxel_size, voxel_size, voxel_size], dtype=np.uint8)
+                np_voxels[0, indices[:, 0], indices[:, 1], indices[:, 2]] = 1
+                np_voxels[1:, indices[:, 0], indices[:, 1], indices[:, 2]] = colors.T * 255
+
+            # np_voxels = np.moveaxis(np_voxels, [0, 1, 2, 3], [0, 3, 2, 1])
+            # np_voxels = np.flip(np_voxels, (1, 2))
+
+            # import matplotlib.pyplot as plt
+            # from mpl_toolkits.mplot3d import Axes3D
+
+            # # Create a 3D plot
+            # fig = plt.figure()
+            # ax = fig.add_subplot(111, projection='3d')
+            
+            # # indices = np.argwhere(np_voxels[0] != 0)
+            # # colors = np_voxels[1:, indices[:, 0], indices[:, 1], indices[:, 2]].T
+
+            # ax.scatter(indices[:, 0], indices[:, 1], indices[:, 2], color=colors, marker='s')
+
+            # # Set labels and show the plot
+            # ax.set_xlabel('X Axis')
+            # ax.set_ylabel('Y Axis')
+            # ax.set_zlabel('Z Axis')
+            # ax.set_xlim(0, 64)
+            # ax.set_ylim(0, 64)
+            # ax.set_zlim(0, 64)
+            # plt.savefig('test2.png')
+            # plt.close()
+
+            ret['voxels'] = np_voxels
+
+            bounding_box = o3d.geometry.AxisAlignedBoundingBox(self.pc_workspace.T[0], self.pc_workspace.T[1])
+            cropped_pcd = all_pcds.crop(bounding_box)
+            if len(cropped_pcd.points) == 0:
+                # create fake points
+                cropped_pcd.points = o3d.utility.Vector3dVector(np.array([[0., 0., 0.]]))
+                cropped_pcd.colors = o3d.utility.Vector3dVector(np.array([[0., 0., 0.]]))
+            if len(cropped_pcd.points) < 1024:
+                # random upsample to 1024
+                num_pad = 1024 - len(cropped_pcd.points)
+                indices = np.random.choice(len(cropped_pcd.points), num_pad)
+                padded_xyz = np.asarray(cropped_pcd.points)[indices]
+                padded_color = np.asarray(cropped_pcd.colors)[indices]
+                xyz = np.concatenate([np.asarray(cropped_pcd.points), padded_xyz], 0)
+                color = np.concatenate([np.asarray(cropped_pcd.colors), padded_color], 0)
+                cropped_pcd = o3d.geometry.PointCloud()
+                cropped_pcd.points = o3d.utility.Vector3dVector(xyz)
+                cropped_pcd.colors = o3d.utility.Vector3dVector(color)
+            sampled_pcds = cropped_pcd.farthest_point_down_sample(1024)
+            xyz = np.asarray(sampled_pcds.points)
+            color = np.asarray(sampled_pcds.colors)
+
+            # import matplotlib.pyplot as plt
+            # from mpl_toolkits.mplot3d import Axes3D
+            # fig = plt.figure()
+            # ax = fig.add_subplot(111, projection='3d')
+
+            # # Scatter plot
+            # ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], c=color, s=20)
+
+            # # Labels
+            # ax.set_xlabel('X Label')
+            # ax.set_ylabel('Y Label')
+            # ax.set_zlabel('Z Label')
+
+            # # Save the plot
+            # plt.savefig('1.png')
+            # plt.close()
+
+            ret['point_cloud'] = np.concatenate([xyz, color], 1)
 
         if self._is_v1:
             for robot in self.env.robots:
@@ -195,7 +397,8 @@ class EnvRobosuite(EB.EnvBase):
                 # ensures that we don't accidentally add robot wrist images a second time
                 pf = robot.robot_model.naming_prefix
                 for k in di:
-                    if k.startswith(pf) and (k not in ret) and (not k.endswith("proprio-state")):
+                    if k.startswith(pf) and (k not in ret) and \
+                            (not k.endswith("proprio-state")):
                         ret[k] = np.array(di[k])
         else:
             # minimal proprioception for older versions of robosuite
@@ -273,13 +476,25 @@ class EnvRobosuite(EB.EnvBase):
         """
         return EB.EnvType.ROBOSUITE_TYPE
 
+    @property
+    def version(self):
+        """
+        Returns version of robosuite used for this environment, eg. 1.2.0
+        """
+        return robosuite.__version__
+
     def serialize(self):
         """
         Save all information needed to re-instantiate this environment in a dictionary.
         This is the same as @env_meta - environment metadata stored in hdf5 datasets,
         and used in utils/env_utils.py.
         """
-        return dict(env_name=self.name, type=self.type, env_kwargs=deepcopy(self._init_kwargs))
+        return dict(
+            env_name=self.name,
+            env_version=self.version,
+            type=self.type,
+            env_kwargs=deepcopy(self._init_kwargs)
+        )
 
     @classmethod
     def create_for_data_processing(
@@ -328,14 +543,16 @@ class EnvRobosuite(EB.EnvBase):
         image_modalities = list(camera_names)
         if is_v1:
             image_modalities = ["{}_image".format(cn) for cn in camera_names]
+            depth_modalities = ["{}_depth".format(cn) for cn in camera_names]
         elif has_camera:
-            # v0.3 only had support for one image, and it was named "image"
+            # v0.3 only had support for one image, and it was named "rgb"
             assert len(image_modalities) == 1
-            image_modalities = ["image"]
+            image_modalities = ["rgb"]
         obs_modality_specs = {
             "obs": {
                 "low_dim": [], # technically unused, so we don't have to specify all of them
-                "image": image_modalities,
+                "rgb": image_modalities,
+                "depth": depth_modalities,
             }
         }
         ObsUtils.initialize_obs_utils_with_obs_specs(obs_modality_specs)
@@ -357,7 +574,7 @@ class EnvRobosuite(EB.EnvBase):
         that the entire training run doesn't crash because of a bad policy that causes unstable
         simulation computations.
         """
-        return (mujoco_py.builder.MujocoException)
+        return tuple(MUJOCO_EXCEPTIONS)
 
     def __repr__(self):
         """

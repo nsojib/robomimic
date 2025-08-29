@@ -60,6 +60,14 @@ robomimic.utils.obs\_utils module
    :undoc-members:
    :show-inheritance:
 
+robomimic.utils.python\_utils module
+------------------------------------
+
+.. automodule:: robomimic.utils.python_utils
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 robomimic.utils.tensor\_utils module
 ------------------------------------
 

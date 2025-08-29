@@ -105,8 +105,8 @@ class CQL(PolicyAlgo, ValueAlgo):
             goal_shapes=self.goal_shapes,
             ac_dim=self.ac_dim,
             mlp_layer_dims=self.algo_config.actor.layer_dims,
+            encoder_kwargs=ObsUtils.obs_encoder_kwargs_from_config(self.obs_config.encoder),
             **actor_args,
-            **ObsNets.obs_encoder_args_from_config(self.obs_config.encoder),
         )
 
         # Critics
@@ -120,7 +120,7 @@ class CQL(PolicyAlgo, ValueAlgo):
                     mlp_layer_dims=self.algo_config.critic.layer_dims,
                     value_bounds=self.algo_config.critic.value_bounds,
                     goal_shapes=self.goal_shapes,
-                    **ObsNets.obs_encoder_args_from_config(self.obs_config.encoder),
+                    encoder_kwargs=ObsUtils.obs_encoder_kwargs_from_config(self.obs_config.encoder),
                 )
                 net_list.append(critic)
 
@@ -208,7 +208,9 @@ class CQL(PolicyAlgo, ValueAlgo):
         done_seq = batch["dones"][:, :self.n_step]
         input_batch["dones"] = (done_seq.sum(dim=1) > 0).float().unsqueeze(1)
 
-        return TensorUtils.to_device(TensorUtils.to_float(input_batch), self.device)
+        # we move to device first before float conversion because image observation modalities will be uint8 -
+        # this minimizes the amount of data transferred to GPU
+        return TensorUtils.to_float(TensorUtils.to_device(input_batch, self.device))
 
     def train_on_batch(self, batch, epoch, validate=False):
         """

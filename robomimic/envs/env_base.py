@@ -13,6 +13,7 @@ class EnvType:
     """
     ROBOSUITE_TYPE = 1
     GYM_TYPE = 2
+    IG_MOMART_TYPE = 3
 
 
 class EnvBase(abc.ABC):
@@ -162,6 +163,14 @@ class EnvBase(abc.ABC):
         This helps identify this env class.
         """
         return
+
+    @property
+    def version(self):
+        """
+        Returns version of environment (str).
+        This is not an abstract method, some subclasses do not implement it
+        """
+        return None
 
     @abc.abstractmethod
     def serialize(self):

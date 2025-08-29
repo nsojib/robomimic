@@ -3,20 +3,26 @@ Contains torch Modules that correspond to basic network building blocks, like
 MLP, RNN, and CNN backbones.
 """
 
-import sys
 import math
 import abc
 import numpy as np
 import textwrap
-from copy import deepcopy
+from collections import OrderedDict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision import transforms
 from torchvision import models as vision_models
 
 import robomimic.utils.tensor_utils as TensorUtils
-import robomimic.utils.obs_utils as ObsUtils
+
+
+CONV_ACTIVATIONS = {
+    "relu": nn.ReLU,
+    "None": None,
+    None: None,
+}
 
 
 def rnn_args_from_config(rnn_config):
@@ -31,6 +37,30 @@ def rnn_args_from_config(rnn_config):
         rnn_type=rnn_config.rnn_type,
         rnn_kwargs=dict(rnn_config.kwargs),
     )
+
+
+def transformer_args_from_config(transformer_config):
+    """
+    Takes a Config object corresponding to Transformer settings
+    (for example `config.algo.transformer` in BCConfig) and extracts
+    transformer kwargs for instantiating transformer networks.
+    """
+    transformer_args = dict(
+        transformer_context_length=transformer_config.context_length,
+        transformer_embed_dim=transformer_config.embed_dim,
+        transformer_num_heads=transformer_config.num_heads,
+        transformer_emb_dropout=transformer_config.emb_dropout,
+        transformer_attn_dropout=transformer_config.attn_dropout,
+        transformer_block_output_dropout=transformer_config.block_output_dropout,
+        transformer_sinusoidal_embedding=transformer_config.sinusoidal_embedding,
+        transformer_activation=transformer_config.activation,
+        transformer_nn_parameter_for_timesteps=transformer_config.nn_parameter_for_timesteps,
+    )
+    
+    if "num_layers" in transformer_config:
+        transformer_args["transformer_num_layers"] = transformer_config.num_layers
+
+    return transformer_args
 
 
 class Module(torch.nn.Module):
@@ -58,10 +88,20 @@ class Sequential(torch.nn.Sequential, Module):
     """
     Compose multiple Modules together (defined above).
     """
-    def __init__(self, *args):
+    def __init__(self, *args, has_output_shape = True):
+        """
+        Args:
+            has_output_shape (bool, optional): indicates whether output_shape can be called on the Sequential module.
+                torch.nn modules do not have an output_shape, but Modules (defined above) do. Defaults to True.
+        """
         for arg in args:
-            assert isinstance(arg, Module)
+            if has_output_shape:
+                assert isinstance(arg, Module)
+            else:
+                assert isinstance(arg, nn.Module)
         torch.nn.Sequential.__init__(self, *args)
+        self.fixed = False
+        self.has_output_shape = has_output_shape
 
     def output_shape(self, input_shape=None):
         """
@@ -75,10 +115,21 @@ class Sequential(torch.nn.Sequential, Module):
         Returns:
             out_shape ([int]): list of integers corresponding to output shape
         """
+        if not self.has_output_shape:
+            raise NotImplementedError("Output shape is not defined for this module")
         out_shape = input_shape
         for module in self:
             out_shape = module.output_shape(out_shape)
         return out_shape
+
+    def freeze(self):
+        self.fixed = True
+
+    def train(self, mode):
+        if self.fixed:
+            super().train(False)
+        else:
+            super().train(mode)
 
 
 class Parameter(Module):
@@ -113,6 +164,39 @@ class Parameter(Module):
         Forward call just returns the parameter tensor.
         """
         return self.param
+
+
+class Unsqueeze(Module):
+    """
+    Trivial class that unsqueezes the input. Useful for including in a nn.Sequential network
+    """
+    def __init__(self, dim):
+        super(Unsqueeze, self).__init__()
+        self.dim = dim
+
+    def output_shape(self, input_shape=None):
+        assert input_shape is not None
+        return input_shape + [1] if self.dim == -1 else input_shape[:self.dim + 1] + [1] + input_shape[self.dim + 1:]
+
+    def forward(self, x):
+        return x.unsqueeze(dim=self.dim)
+
+
+class Squeeze(Module):
+    """
+    Trivial class that squeezes the input. Useful for including in a nn.Sequential network
+    """
+
+    def __init__(self, dim):
+        super(Squeeze, self).__init__()
+        self.dim = dim
+
+    def output_shape(self, input_shape=None):
+        assert input_shape is not None
+        return input_shape[:self.dim] + input_shape[self.dim+1:] if input_shape[self.dim] == 1 else input_shape
+
+    def forward(self, x):
+        return x.squeeze(dim=self.dim)
 
 
 class MLP(Module):
@@ -458,6 +542,166 @@ class ResNet18Conv(ConvBase):
         return header + '(input_channel={}, input_coord_conv={})'.format(self._input_channel, self._input_coord_conv)
 
 
+class R3MConv(ConvBase):
+    """
+    Base class for ConvNets pretrained with R3M (https://arxiv.org/abs/2203.12601)
+    """
+    def __init__(
+        self,
+        input_channel=3,
+        r3m_model_class='resnet18',
+        freeze=True,
+    ):
+        """
+        Using R3M pretrained observation encoder network proposed by https://arxiv.org/abs/2203.12601
+        Args:
+            input_channel (int): number of input channels for input images to the network.
+                If not equal to 3, modifies first conv layer in ResNet to handle the number
+                of input channels.
+            r3m_model_class (str): select one of the r3m pretrained model "resnet18", "resnet34" or "resnet50"
+            freeze (bool): if True, use a frozen R3M pretrained model.
+        """
+        super(R3MConv, self).__init__()
+
+        try:
+            from r3m import load_r3m
+        except ImportError:
+            print("WARNING: could not load r3m library! Please follow https://github.com/facebookresearch/r3m to install R3M")
+
+        net = load_r3m(r3m_model_class)
+
+        assert input_channel == 3 # R3M only support input image with channel size 3
+        assert r3m_model_class in ["resnet18", "resnet34", "resnet50"] # make sure the selected r3m model do exist
+
+        # cut the last fc layer
+        self._input_channel = input_channel
+        self._r3m_model_class = r3m_model_class
+        self._freeze = freeze
+        self._input_coord_conv = False
+        self._pretrained = True
+
+        preprocess = nn.Sequential(
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        )
+        self.nets = Sequential(*([preprocess] + list(net.module.convnet.children())), has_output_shape = False)
+        if freeze:
+            self.nets.freeze()
+
+        self.weight_sum = np.sum([param.cpu().data.numpy().sum() for param in self.nets.parameters()])
+        if freeze:
+            for param in self.nets.parameters():
+                param.requires_grad = False
+
+        self.nets.eval()
+
+    def output_shape(self, input_shape):
+        """
+        Function to compute output shape from inputs to this module.
+        Args:
+            input_shape (iterable of int): shape of input. Does not include batch dimension.
+                Some modules may not need this argument, if their output does not depend
+                on the size of the input, or if they assume fixed size input.
+        Returns:
+            out_shape ([int]): list of integers corresponding to output shape
+        """
+        assert(len(input_shape) == 3)
+
+        if self._r3m_model_class == 'resnet50':
+            out_dim = 2048
+        else:
+            out_dim = 512
+
+        return [out_dim, 1, 1]
+
+    def __repr__(self):
+        """Pretty print network."""
+        header = '{}'.format(str(self.__class__.__name__))
+        return header + '(input_channel={}, input_coord_conv={}, pretrained={}, freeze={})'.format(self._input_channel, self._input_coord_conv, self._pretrained, self._freeze)
+
+
+class MVPConv(ConvBase):
+    """
+    Base class for ConvNets pretrained with MVP (https://arxiv.org/abs/2203.06173)
+    """
+    def __init__(
+        self,
+        input_channel=3,
+        mvp_model_class='vitb-mae-egosoup',
+        freeze=True,
+    ):
+        """
+        Using MVP pretrained observation encoder network proposed by https://arxiv.org/abs/2203.06173
+        Args:
+            input_channel (int): number of input channels for input images to the network.
+                If not equal to 3, modifies first conv layer in ResNet to handle the number
+                of input channels.
+            mvp_model_class (str): select one of the mvp pretrained model "vits-mae-hoi", "vits-mae-in", "vits-sup-in", "vitb-mae-egosoup" or "vitl-256-mae-egosoup"
+            freeze (bool): if True, use a frozen MVP pretrained model.
+        """
+        super(MVPConv, self).__init__()
+
+        try:
+            import mvp
+        except ImportError:
+            print("WARNING: could not load mvp library! Please follow https://github.com/ir413/mvp to install MVP.")
+
+        self.nets = mvp.load(mvp_model_class)
+        if freeze:
+            self.nets.freeze()
+
+        assert input_channel == 3 # MVP only support input image with channel size 3
+        assert mvp_model_class in ["vits-mae-hoi", "vits-mae-in", "vits-sup-in", "vitb-mae-egosoup", "vitl-256-mae-egosoup"] # make sure the selected r3m model do exist
+
+        self._input_channel = input_channel
+        self._freeze = freeze
+        self._mvp_model_class = mvp_model_class
+        self._input_coord_conv = False
+        self._pretrained = True
+
+        if '256' in mvp_model_class:
+            input_img_size = 256
+        else:
+            input_img_size = 224
+        self.preprocess = nn.Sequential(
+            transforms.Resize(input_img_size)
+        )
+
+    def forward(self, inputs):
+        x = self.preprocess(inputs)
+        x = self.nets(x)
+        if list(self.output_shape(list(inputs.shape)[1:])) != list(x.shape)[1:]:
+            raise ValueError('Size mismatch: expect size %s, but got size %s' % (
+                str(self.output_shape(list(inputs.shape)[1:])), str(list(x.shape)[1:]))
+            )
+        return x
+
+    def output_shape(self, input_shape):
+        """
+        Function to compute output shape from inputs to this module.
+        Args:
+            input_shape (iterable of int): shape of input. Does not include batch dimension.
+                Some modules may not need this argument, if their output does not depend
+                on the size of the input, or if they assume fixed size input.
+        Returns:
+            out_shape ([int]): list of integers corresponding to output shape
+        """
+        assert(len(input_shape) == 3)
+        if 'vitb' in self._mvp_model_class:
+            output_shape = [768]
+        elif 'vitl' in self._mvp_model_class:
+            output_shape = [1024]
+        else:
+            output_shape = [384]
+        return output_shape
+
+    def __repr__(self):
+        """Pretty print network."""
+        header = '{}'.format(str(self.__class__.__name__))
+        return header + '(input_channel={}, input_coord_conv={}, pretrained={}, freeze={})'.format(self._input_channel, self._input_coord_conv, self._pretrained, self._freeze)
+
+
 class CoordConv2d(nn.Conv2d, Module):
     """
     2D Coordinate Convolution
@@ -579,6 +823,79 @@ class ShallowConv(ConvBase):
         return [self._output_channel, out_h, out_w]
 
 
+class Conv1dBase(Module):
+    """
+    Base class for stacked Conv1d layers.
+
+    Args:
+        input_channel (int): Number of channels for inputs to this network
+        activation (None or str): Per-layer activation to use. Defaults to "relu". Valid options are
+            currently {relu, None} for no activation
+        out_channels (list of int): Output channel size for each sequential Conv1d layer
+        kernel_size (list of int): Kernel sizes for each sequential Conv1d layer
+        stride (list of int): Stride sizes for each sequential Conv1d layer
+        conv_kwargs (dict): additional nn.Conv1D args to use, in list form, where the ith element corresponds to the
+            argument to be passed to the ith Conv1D layer.
+            See https://pytorch.org/docs/stable/generated/torch.nn.Conv1d.html for specific possible arguments.
+    """
+    def __init__(
+        self,
+        input_channel=1,
+        activation="relu",
+        out_channels=(32, 64, 64),
+        kernel_size=(8, 4, 2),
+        stride=(4, 2, 1),
+        **conv_kwargs,
+    ):
+        super(Conv1dBase, self).__init__()
+
+        # Get activation requested
+        activation = CONV_ACTIVATIONS[activation]
+
+        # Generate network
+        self.n_layers = len(out_channels)
+        layers = OrderedDict()
+        for i in range(self.n_layers):
+            layer_kwargs = {k: v[i] for k, v in conv_kwargs.items()}
+            layers[f'conv{i}'] = nn.Conv1d(
+                in_channels=input_channel,
+                **layer_kwargs,
+            )
+            if activation is not None:
+                layers[f'act{i}'] = activation()
+            input_channel = layer_kwargs["out_channels"]
+
+        # Store network
+        self.nets = nn.Sequential(layers)
+
+    def output_shape(self, input_shape):
+        """
+        Function to compute output shape from inputs to this module.
+
+        Args:
+            input_shape (iterable of int): shape of input. Does not include batch dimension.
+                Some modules may not need this argument, if their output does not depend
+                on the size of the input, or if they assume fixed size input.
+
+        Returns:
+            out_shape ([int]): list of integers corresponding to output shape
+        """
+        channels, length = input_shape
+        for i in range(self.n_layers):
+            net = getattr(self.nets, f"conv{i}")
+            channels = net.out_channels
+            length = int((length + 2 * net.padding[0] - net.dilation[0] * (net.kernel_size[0] - 1) - 1) / net.stride[0]) + 1
+        return [channels, length]
+
+    def forward(self, inputs):
+        x = self.nets(inputs)
+        if list(self.output_shape(list(inputs.shape)[1:])) != list(x.shape)[1:]:
+            raise ValueError('Size mismatch: expect size %s, but got size %s' % (
+                str(self.output_shape(list(inputs.shape)[1:])), str(list(x.shape)[1:]))
+            )
+        return x
+
+
 """
 ================================================
 Pooling Networks
@@ -594,7 +911,7 @@ class SpatialSoftmax(ConvBase):
     def __init__(
         self,
         input_shape,
-        num_kp=None,
+        num_kp=32,
         temperature=1.,
         learnable_temperature=False,
         output_variance=False,
@@ -603,7 +920,7 @@ class SpatialSoftmax(ConvBase):
         """
         Args:
             input_shape (list): shape of the input feature (C, H, W)
-            num_kp (int): number of keypoints (None for not use spatialsoftmax)
+            num_kp (int): number of keypoints (None for not using spatialsoftmax)
             temperature (float): temperature term for the softmax.
             learnable_temperature (bool): whether to learn the temperature
             output_variance (bool): treat attention as a distribution, and compute second-order statistics to return
@@ -792,307 +1109,3 @@ class FeatureAggregator(Module):
             # weighted mean-pooling
             return torch.sum(x * self.agg_weight, dim=1)
         raise Exception("unexpected agg type: {}".forward(self.agg_type))
-
-
-"""
-================================================
-Visual Core Networks (Backbone + Pool)
-================================================
-"""
-class VisualCore(ConvBase):
-    """
-    A network block that combines a visual backbone network with optional pooling
-    and linear layers.
-    """
-    def __init__(
-        self,
-        input_shape,
-        visual_core_class,
-        visual_core_kwargs,
-        pool_class=None,
-        pool_kwargs=None,
-        flatten=True,
-        visual_feature_dimension=None,
-    ):
-        """
-        Args:
-            input_shape (tuple): shape of input (not including batch dimension)
-            visual_core_class (str): class name for the visual core
-            visual_core_kwargs (dict): kwargs for the visual core
-            pool_class (str): class name for the visual feature pooler (optional)
-            pool_kwargs (dict): kwargs for the visual feature pooler (optional)
-            flatten (bool): whether to flatten the visual feature
-            visual_feature_dimension (int): if not None, add a Linear layer to 
-                project output into a desired feature dimension
-        """
-        super(VisualCore, self).__init__()
-        self.input_shape = input_shape
-        self.flatten = flatten
-
-        # add input channel dimension to visual core inputs
-        visual_core_kwargs = deepcopy(visual_core_kwargs)
-        visual_core_kwargs["input_channel"] = input_shape[0]
-
-        # visual backbone
-        assert isinstance(visual_core_class, str)
-        if pool_class is not None:
-            assert isinstance(pool_class, str)
-        self.vis_core = eval(visual_core_class)(**visual_core_kwargs)
-
-        assert isinstance(self.vis_core, ConvBase)
-
-        feat_shape = self.vis_core.output_shape(input_shape)
-        net_list = [self.vis_core]
-
-        # maybe make pool net
-        if pool_class is not None:
-            # feed output shape of backbone to pool net
-            if pool_kwargs is None:
-                pool_kwargs = dict()
-            pool_kwargs = deepcopy(pool_kwargs)
-            pool_kwargs["input_shape"] = feat_shape
-            self.pool_net = eval(pool_class)(**pool_kwargs)
-            assert isinstance(self.pool_net, Module)
-
-            feat_shape = self.pool_net.output_shape(feat_shape)
-            net_list.append(self.pool_net)
-        else:
-            self.pool_net = None
-
-        # flatten layer
-        if self.flatten:
-            net_list.append(torch.nn.Flatten(start_dim=1, end_dim=-1))
-
-        # maybe linear layer
-        self.visual_feature_dimension = visual_feature_dimension
-        if visual_feature_dimension is not None:
-            assert self.flatten
-            linear = torch.nn.Linear(int(np.prod(feat_shape)), visual_feature_dimension)
-            net_list.append(linear)
-
-        self.nets = nn.Sequential(*net_list)
-
-    def output_shape(self, input_shape):
-        """
-        Function to compute output shape from inputs to this module. 
-
-        Args:
-            input_shape (iterable of int): shape of input. Does not include batch dimension.
-                Some modules may not need this argument, if their output does not depend 
-                on the size of the input, or if they assume fixed size input.
-
-        Returns:
-            out_shape ([int]): list of integers corresponding to output shape
-        """
-        if self.visual_feature_dimension is not None:
-            # linear output
-            return [self.visual_feature_dimension]
-        feat_shape = self.vis_core.output_shape(input_shape)
-        if self.pool_net is not None:
-            # pool output
-            feat_shape = self.pool_net.output_shape(feat_shape)
-        # backbone + flat output
-        if self.flatten:
-            return [np.prod(feat_shape)]
-        else:
-            return feat_shape
-
-    def forward(self, inputs):
-        """
-        Forward pass through visual core.
-        """
-        ndim = len(self.input_shape)
-        assert tuple(inputs.shape)[-ndim:] == tuple(self.input_shape)
-        return super(VisualCore, self).forward(inputs)
-
-    def __repr__(self):
-        """Pretty print network."""
-        header = '{}'.format(str(self.__class__.__name__))
-        msg = ''
-        indent = ' ' * 2
-        msg += textwrap.indent(
-            "\ninput_shape={}\noutput_shape={}".format(self.input_shape, self.output_shape(self.input_shape)), indent)
-        msg += textwrap.indent("\nvisual_net={}".format(self.vis_core), indent)
-        msg += textwrap.indent("\npool_net={}".format(self.pool_net), indent)
-        msg = header + '(' + msg + '\n)'
-        return msg
-
-
-"""
-================================================
-Observation Randomizer Networks
-================================================
-"""
-class Randomizer(Module):
-    """
-    Base class for randomizer networks. Each randomizer should implement the @output_shape_in,
-    @output_shape_out, @forward_in, and @forward_out methods. The randomizer's @forward_in
-    method is invoked on raw inputs, and @forward_out is invoked on processed inputs
-    (usually processed by a @VisualCore instance). Note that the self.training property
-    can be used to change the randomizer's behavior at train vs. test time.
-    """
-    def __init__(self):
-        super(Randomizer, self).__init__()
-
-    def output_shape(self, input_shape=None):
-        """
-        This function is unused. See @output_shape_in and @output_shape_out.
-        """
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def output_shape_in(self, input_shape=None):
-        """
-        Function to compute output shape from inputs to this module. Corresponds to
-        the @forward_in operation, where raw inputs (usually observation modalities)
-        are passed in.
-
-        Args:
-            input_shape (iterable of int): shape of input. Does not include batch dimension.
-                Some modules may not need this argument, if their output does not depend 
-                on the size of the input, or if they assume fixed size input.
-
-        Returns:
-            out_shape ([int]): list of integers corresponding to output shape
-        """
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def output_shape_out(self, input_shape=None):
-        """
-        Function to compute output shape from inputs to this module. Corresponds to
-        the @forward_out operation, where processed inputs (usually encoded observation
-        modalities) are passed in.
-
-        Args:
-            input_shape (iterable of int): shape of input. Does not include batch dimension.
-                Some modules may not need this argument, if their output does not depend 
-                on the size of the input, or if they assume fixed size input.
-
-        Returns:
-            out_shape ([int]): list of integers corresponding to output shape
-        """
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def forward_in(self, inputs):
-        """
-        Randomize raw inputs.
-        """
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def forward_out(self, inputs):
-        """
-        Processing for network outputs.
-        """
-        return inputs
-
-
-class CropRandomizer(Randomizer):
-    """
-    Randomly sample crops at input, and then average across crop features at output.
-    """
-    def __init__(
-        self,
-        input_shape,
-        crop_height, 
-        crop_width, 
-        num_crops=1,
-        pos_enc=False,
-    ):
-        """
-        Args:
-            input_shape (tuple, list): shape of input (not including batch dimension)
-            crop_height (int): crop height
-            crop_width (int): crop width
-            num_crops (int): number of random crops to take
-            pos_enc (bool): if True, add 2 channels to the output to encode the spatial
-                location of the cropped pixels in the source image
-        """
-        super(CropRandomizer, self).__init__()
-
-        assert len(input_shape) == 3 # (C, H, W)
-        assert crop_height < input_shape[1]
-        assert crop_width < input_shape[2]
-
-        self.input_shape = input_shape
-        self.crop_height = crop_height
-        self.crop_width = crop_width
-        self.num_crops = num_crops
-        self.pos_enc = pos_enc
-
-    def output_shape_in(self, input_shape=None):
-        """
-        Function to compute output shape from inputs to this module. Corresponds to
-        the @forward_in operation, where raw inputs (usually observation modalities)
-        are passed in.
-
-        Args:
-            input_shape (iterable of int): shape of input. Does not include batch dimension.
-                Some modules may not need this argument, if their output does not depend 
-                on the size of the input, or if they assume fixed size input.
-
-        Returns:
-            out_shape ([int]): list of integers corresponding to output shape
-        """
-
-        # outputs are shape (C, CH, CW), or maybe C + 2 if using position encoding, because
-        # the number of crops are reshaped into the batch dimension, increasing the batch
-        # size from B to B * N
-        out_c = self.input_shape[0] + 2 if self.pos_enc else self.input_shape[0]
-        return [out_c, self.crop_height, self.crop_width]
-
-    def output_shape_out(self, input_shape=None):
-        """
-        Function to compute output shape from inputs to this module. Corresponds to
-        the @forward_out operation, where processed inputs (usually encoded observation
-        modalities) are passed in.
-
-        Args:
-            input_shape (iterable of int): shape of input. Does not include batch dimension.
-                Some modules may not need this argument, if their output does not depend 
-                on the size of the input, or if they assume fixed size input.
-
-        Returns:
-            out_shape ([int]): list of integers corresponding to output shape
-        """
-        
-        # since the forward_out operation splits [B * N, ...] -> [B, N, ...]
-        # and then pools to result in [B, ...], only the batch dimension changes,
-        # and so the other dimensions retain their shape.
-        return list(input_shape)
-
-    def forward_in(self, inputs):
-        """
-        Samples N random crops for each input in the batch, and then reshapes
-        inputs to [B * N, ...].
-        """
-        assert len(inputs.shape) >= 3 # must have at least (C, H, W) dimensions
-        out, _ = ObsUtils.sample_random_image_crops(
-            images=inputs,
-            crop_height=self.crop_height, 
-            crop_width=self.crop_width, 
-            num_crops=self.num_crops,
-            pos_enc=self.pos_enc,
-        )
-        # [B, N, ...] -> [B * N, ...]
-        return TensorUtils.join_dimensions(out, 0, 1)
-
-    def forward_out(self, inputs):
-        """
-        Splits the outputs from shape [B * N, ...] -> [B, N, ...] and then average across N
-        to result in shape [B, ...] to make sure the network output is consistent with
-        what would have happened if there were no randomization.
-        """
-        batch_size = (inputs.shape[0] // self.num_crops)
-        out = TensorUtils.reshape_dimensions(inputs, begin_axis=0, end_axis=0, 
-            target_dims=(batch_size, self.num_crops))
-        return out.mean(dim=1)
-
-    def __repr__(self):
-        """Pretty print network."""
-        header = '{}'.format(str(self.__class__.__name__))
-        msg = header + "(input_shape={}, crop_size=[{}, {}], num_crops={})".format(
-            self.input_shape, self.crop_height, self.crop_width, self.num_crops)
-        return msg

@@ -39,8 +39,30 @@ import robomimic.utils.env_utils as EnvUtils
 import robomimic.utils.file_utils as FileUtils
 from robomimic.config import config_factory
 from robomimic.algo import algo_factory, RolloutPolicy
-from robomimic.utils.log_utils import PrintLogger, DataLogger
+from robomimic.utils.log_utils import PrintLogger, DataLogger, flush_warnings
 
+def print_run_command():
+    import sys
+    import shlex
+    import datetime
+    import os
+    import socket
+
+    # Reconstruct the command line, properly shell‑quoting each part
+    cmd = " ".join([shlex.quote(sys.executable)] + [shlex.quote(arg) for arg in sys.argv])
+    cwd = os.getcwd()
+    now = datetime.datetime.now()
+    conda_env = os.environ.get("CONDA_DEFAULT_ENV", "N/A")
+
+    print("\n----------------------run info----------------------")
+    print(f"now = {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"cmd = {cmd}")
+    print(f"cwd = {cwd}")
+    print(f"hostname = {socket.gethostname()}")
+    print(f"pid = {os.getpid()}")
+    print(f"python version = {sys.version}")
+    print(f"conda env = {conda_env}")
+    print("------------------------------------------------------\n")
 
 # load the expert ids as a dictionary
 def load_expert_ids(file_path):
@@ -57,24 +79,25 @@ def load_expert_ids(file_path):
             expert_ids[demo_name] = int(operator_id)
     return expert_ids, dataset_path
 
-def get_run_command():
-    import sys
-    import shlex
-    # reconstruct the command line, properly shell‑quoting each part
-    cmd = " ".join([shlex.quote(sys.executable)] + [shlex.quote(arg) for arg in sys.argv])
-    cwd= os.getcwd()
-    return cmd, cwd
-
-def train(config, expert_ids, device):
+def train_ileed(config, device, expert_ids):
     """
     Train a model using the algorithm.
     """
-     
+
     # first set seeds
     np.random.seed(config.train.seed)
     torch.manual_seed(config.train.seed)
 
+    torch.set_num_threads(2)
 
+    #ileed edit.
+    config.unlock()
+    config.train.hdf5_cache_mode=None 
+    config.lock()
+
+    print("\n============= New Training Run with Config =============")
+    print(config)
+    print("")
     log_dir, ckpt_dir, video_dir = TrainUtils.get_exp_dir(config)
 
     if config.experiment.logging.terminal_output_to_txt:
@@ -83,30 +106,13 @@ def train(config, expert_ids, device):
         sys.stdout = logger
         sys.stderr = logger
 
-
-    print("\n----------------------run info----------------------")
-    cmd, cwd = get_run_command() 
-    print(f"cmd = {cmd}")
-    print(f"cwd = {cwd}")
-    print(f"hostname = {socket.gethostname()}")
-    print(f"pid = {os.getpid()}")
-    print(f"python version = {sys.version}")
-    print('------------------------------------------------------\n')
-
-
+    print_run_command()
     M=len( set(expert_ids.values()) ) #number of total operators in the dataset.
     #based on filterkey, actual used operators are a subset of M.
     print(f"Total number of operators in dataset: M={M}")
 
 
-
-    print("\n============= New Training Run with Config =============")
-    print(config)
-    print("")
-
-
-
-    # read config to set up metadata for observation types (e.g. detecting image observations)
+    # read config to set up metadata for observation modalities (e.g. detecting rgb observations)
     ObsUtils.initialize_obs_utils_with_config(config)
 
     # make sure the dataset exists
@@ -119,7 +125,7 @@ def train(config, expert_ids, device):
     env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=config.train.data)
     shape_meta = FileUtils.get_shape_metadata_from_dataset(
         dataset_path=config.train.data,
-        all_modalities=config.all_modalities,
+        all_obs_keys=config.all_obs_keys,
         verbose=True
     )
 
@@ -145,6 +151,7 @@ def train(config, expert_ids, device):
                 render_offscreen=config.experiment.render_video,
                 use_image_obs=shape_meta["use_images"], 
             )
+            env = EnvUtils.wrap_env_from_config(env, config=config) # apply environment warpper, if applicable
             envs[env.name] = env
             print(envs[env.name])
 
@@ -153,33 +160,37 @@ def train(config, expert_ids, device):
     # setup for a new training run
     data_logger = DataLogger(
         log_dir,
+        config,
         log_tb=config.experiment.logging.log_tb,
+        log_wandb=config.experiment.logging.log_wandb,
     )
     model = algo_factory(
         algo_name=config.algo_name,
         config=config,
-        modality_shapes=shape_meta["all_shapes"],
+        obs_key_shapes=shape_meta["all_shapes"],
         ac_dim=shape_meta["ac_dim"],
         device=device,
     )
-
-    print("\n============= Model Summary =============")
-    print(model)  # print model summary
-    print("")
-    
     
     # save the config as a json file
     with open(os.path.join(log_dir, '..', 'config.json'), 'w') as outfile:
         json.dump(config, outfile, indent=4)
-    
+
+    print("\n============= Model Summary =============")
+    print(model)  # print model summary
+    print("")
 
     # load training data
     trainset, validset = TrainUtils.load_data_for_training(
-        config, obs_keys=shape_meta["all_modalities"])
+        config, obs_keys=shape_meta["all_obs_keys"])
     train_sampler = trainset.get_dataset_sampler()
     print("\n============= Training Dataset =============")
     print(trainset)
     print("")
+    if validset is not None:
+        print("\n============= Validation Dataset =============")
+        print(validset)
+        print("")
 
     # maybe retreve statistics for normalizing observations
     obs_normalization_stats = None
@@ -195,8 +206,9 @@ def train(config, expert_ids, device):
         num_workers=config.train.num_data_workers,
         drop_last=True
     )
-    
-    trainset.ileed_load_operator_indices(expert_ids)
+
+    trainset.ileed_load_operator_indices(expert_ids) #ileed edit.
+    model.nets['policy'].configure_ileed(M=M, remap_ids=trainset.remap_ids, device=device)  #ileed edit.
 
     if config.experiment.validate:
         # cap num workers for validation dataset at 1
@@ -213,20 +225,12 @@ def train(config, expert_ids, device):
     else:
         valid_loader = None
 
-
-    #ileed
-    # used_ids = np.unique( trainset.index_to_operator_id  )
-    # valid_ids = range(len(used_ids))
-    # invalid_ids =  [i for i in used_ids if i not in valid_ids]
-    # unused_ids = set( valid_ids ) - set(used_ids )
-
-    # remap_ids = {k:v for k, v in zip(invalid_ids, unused_ids)  }
-    # for id in valid_ids:
-    #     if id not in remap_ids.values():
-    #         remap_ids[id]=id 
-
-    model.nets['policy'].configure_ileed(M=M, remap_ids=trainset.remap_ids, device=device)  
-
+    # print all warnings before training begins
+    print("*" * 50)
+    print("Warnings generated by robomimic have been duplicated here (from above) for convenience. Please check them carefully.")
+    flush_warnings()
+    print("*" * 50)
+    print("")
 
     # main training loop
     best_valid_loss = None
@@ -239,8 +243,14 @@ def train(config, expert_ids, device):
     valid_num_steps = config.experiment.validation_epoch_every_n_steps
 
     for epoch in range(1, config.train.num_epochs + 1): # epoch numbers start at 1
-        step_log = TrainUtils.run_epoch(model=model, data_loader=train_loader, epoch=epoch, num_steps=train_num_steps)
-        model.nets['policy'].update_rho()
+        step_log = TrainUtils.run_epoch(
+            model=model,
+            data_loader=train_loader,
+            epoch=epoch,
+            num_steps=train_num_steps,
+            obs_normalization_stats=obs_normalization_stats,
+        )
+        model.nets['policy'].update_rho() #ileed edit.
         model.on_epoch_end(epoch)
 
         # setup checkpoint path
@@ -366,7 +376,6 @@ def train(config, expert_ids, device):
             rho_weights=rho_weights.reshape(-1)
             print(f"epoch {epoch} rho weights: {rho_weights}")
 
-
         # Finally, log memory usage in MB
         process = psutil.Process(os.getpid())
         mem_usage = int(process.memory_info().rss / 1000000)
@@ -419,18 +428,18 @@ def main(args):
 
     # lock config to prevent further modifications and ensure missing keys raise errors
     config.lock()
-    
-    
+
+
     expert_ids , dataset_path= load_expert_ids(args.expert_ids)
     print(f"Loaded {len(expert_ids)} expert IDs from file.")
     print(f"Expert ids dataset path: {dataset_path}")
     print(f"Example expert ID: {list(expert_ids.items())[0]}")
-    
+
 
     # catch error during training and print it
     res_str = "finished run successfully!"
     try:
-        train(config, expert_ids, device=device)
+        train_ileed(config, device=device, expert_ids=expert_ids)
     except Exception as e:
         res_str = "run failed with error:\n{}\n\n{}".format(e, traceback.format_exc())
     print(res_str)
@@ -446,13 +455,6 @@ if __name__ == "__main__":
         default=None,
         help="(optional) path to a config json that will be used to override the default settings. \
             If omitted, default settings are used. This is the preferred way to run experiments.",
-    )
-    
-    parser.add_argument(
-        "--expert_ids",
-        type=str,
-        required=True,
-        help="(required) demo_name:expert_id file"
     )
 
     # Algorithm Name
@@ -484,24 +486,17 @@ if __name__ == "__main__":
         action='store_true',
         help="set this flag to run a quick training run for debugging purposes"
     )
-
+    parser.add_argument(
+        "--expert_ids",
+        type=str,
+        required=True,
+        help="(required) demo_name:expert_id file"
+    )
     args = parser.parse_args()
     main(args)
 
 
-    # python train_ileed.py --config /home/carl/offline_study/robomimic/configs/core/square/mh/low_dim/bc_rnn.json
-    
-    # python train.py --config /home/carl/offline_study/robomimic/configs/core/can/mh/low_dim/bc_rnn.json
-    # python train_ileed.py --config /home/carl/offline_study/robomimic/configs/core/can/mh/low_dim/bc_rnn.json
-    
-    
 # python train_ileed.py \
-#     --config /home/carl/offline_study/robomimic/configs/core/square/mh/low_dim/bc_rnn.json \
-#     --expert_ids /home/carl/offline_study/robomimic/robomimic/scripts/expert_ids/expert_ids_square_mh_lowdim.txt
-    
-    
-# python train_ileed.py \
-#     --config /home/carl/offline_study/robomimic/configs/subopt/square/mh/worse_better/low_dim/bc_rnn.json\
-#     --expert_ids /home/carl/offline_study/robomimic/robomimic/scripts/expert_ids/expert_ids_square_mh_lowdim.txt
-    
-    
+#     --config /home/ns1254/equidiff/envs/robomimic/configs/core/square/mh/low_dim/bc_rnn.json\
+#     --expert_ids /home/ns1254/equidiff/envs/robomimic/robomimic/scripts/expert_ids/expert_ids_square_mh_lowdim.txt
+

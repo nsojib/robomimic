@@ -12,12 +12,41 @@ Welcome to robomimic's documentation!
 
    introduction/overview
    introduction/installation
-   introduction/quickstart
-   introduction/advanced
-   introduction/examples
-   introduction/datasets
-   introduction/model_zoo
-   introduction/results
+   introduction/implemented_algorithms
+   introduction/getting_started
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Datasets
+
+   datasets/overview
+   datasets/robomimic_v0.1
+   datasets/robosuite
+   datasets/d4rl
+   datasets/momart
+   datasets/roboturk_pilot
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Pretrained Models
+
+   model_zoo/robomimic_v0.1
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Tutorials
+
+   tutorials/configs
+   tutorials/viewing_results
+   tutorials/hyperparam_scan
+   tutorials/reproducing_experiments
+   tutorials/dataset_contents
+   tutorials/training_transformers
+   tutorials/using_pretrained_models
+   tutorials/observations
+   tutorials/pretrained_representations
+   tutorials/custom_algorithms
+   tutorials/tensor_collections
 
 .. toctree::
    :maxdepth: 1
@@ -46,6 +75,12 @@ Welcome to robomimic's documentation!
    miscellaneous/team
    miscellaneous/acknowledgments
    miscellaneous/references
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Previous Versions
+
+   versions/v0.2
 
 
 Indices and tables

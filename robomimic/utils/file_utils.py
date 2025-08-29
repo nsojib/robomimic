@@ -63,6 +63,25 @@ def create_hdf5_filter_key(hdf5_path, demo_keys, key_name):
     return ep_lengths
 
 
+def get_demos_for_filter_key(hdf5_path, filter_key):
+    """
+    Gets demo keys that correspond to a particular filter key.
+
+    Args:
+        hdf5_path (str): path to hdf5 file
+        filter_key (str): name of filter key
+
+    Returns:
+        demo_keys ([str]): list of demonstration keys that
+            correspond to this filter key. For example, ["demo_0", 
+            "demo_1"].
+    """
+    f = h5py.File(hdf5_path, "r")
+    demo_keys = [elem.decode("utf-8") for elem in np.array(f["mask/{}".format(filter_key)][:])]
+    f.close()
+    return demo_keys
+
+
 def get_env_metadata_from_dataset(dataset_path):
     """
     Retrieves env metadata from dataset.
@@ -84,13 +103,13 @@ def get_env_metadata_from_dataset(dataset_path):
     return env_meta
 
 
-def get_shape_metadata_from_dataset(dataset_path, all_modalities=None, verbose=False):
+def get_shape_metadata_from_dataset(dataset_path, all_obs_keys=None, verbose=False):
     """
     Retrieves shape metadata from dataset.
 
     Args:
         dataset_path (str): path to dataset
-        all_modalities (list): list of all modalities used by the model. If not provided, all modalities
+        all_obs_keys (list): list of all modalities used by the model. If not provided, all modalities
             present in the file are used.
         verbose (bool): if True, include print statements
 
@@ -98,8 +117,8 @@ def get_shape_metadata_from_dataset(dataset_path, all_modalities=None, verbose=F
         shape_meta (dict): shape metadata. Contains the following keys:
 
             :`'ac_dim'`: action space dimension
-            :`'all_shapes'`: dictionary that maps observation modality string to modality shape
-            :`'all_modalities'`: list of all observation modalities used
+            :`'all_shapes'`: dictionary that maps observation key string to shape
+            :`'all_obs_keys'`: list of all observation modalities used
             :`'use_images'`: bool, whether or not image modalities are present
     """
 
@@ -117,24 +136,25 @@ def get_shape_metadata_from_dataset(dataset_path, all_modalities=None, verbose=F
     # observation dimensions
     all_shapes = OrderedDict()
 
-    if all_modalities is None:
+    if all_obs_keys is None:
         # use all modalities present in the file
-        all_modalities = [k for k in demo["obs"]]
+        all_obs_keys = [k for k in demo["obs"]]
 
-    for k in sorted(all_modalities):
-        all_shapes[k] = demo["obs/{}".format(k)].shape[1:]
+    for k in sorted(all_obs_keys):
+        initial_shape = demo["obs/{}".format(k)].shape[1:]
         if verbose:
-            print("obs modality {} with shape {}".format(k, all_shapes[k]))
-
-    for k in all_shapes:
-        if ObsUtils.key_is_image(k):
-            all_shapes[k] = ObsUtils.process_image_shape(all_shapes[k])
+            print("obs key {} with shape {}".format(k, initial_shape))
+        # Store processed shape for each obs key
+        all_shapes[k] = ObsUtils.get_processed_shape(
+            obs_modality=ObsUtils.OBS_KEYS_TO_MODALITIES[k],
+            input_shape=initial_shape,
+        )
 
     f.close()
 
     shape_meta['all_shapes'] = all_shapes
-    shape_meta['all_modalities'] = all_modalities
-    shape_meta['use_images'] = ObsUtils.has_image(all_modalities)
+    shape_meta['all_obs_keys'] = all_obs_keys
+    shape_meta['use_images'] = ObsUtils.has_modality("rgb", all_obs_keys)
 
     return shape_meta
 
@@ -198,6 +218,93 @@ def algo_name_from_checkpoint(ckpt_path=None, ckpt_dict=None):
     return algo_name, ckpt_dict
 
 
+def update_config(cfg):
+    """
+    Updates the config for backwards-compatibility if it uses outdated configurations.
+
+    See https://github.com/ARISE-Initiative/robomimic/releases/tag/v0.2.0 for more info.
+
+    Args:
+        cfg (dict): Raw dictionary of config values
+    """
+    # Check if image modality is defined -- this means we're using an outdated config
+    # Note: There may be a nested hierarchy, so we possibly check all the nested obs cfgs which can include
+    # e.g. a planner and actor for HBC
+
+    def find_obs_dicts_recursively(dic):
+        dics = []
+        if "modalities" in dic:
+            dics.append(dic)
+        else:
+            for child_dic in dic.values():
+                dics += find_obs_dicts_recursively(child_dic)
+        return dics
+
+    obs_cfgs = find_obs_dicts_recursively(cfg["observation"])
+    for obs_cfg in obs_cfgs:
+        modalities = obs_cfg["modalities"]
+
+        found_img = False
+        for modality_group in ("obs", "subgoal", "goal"):
+            if modality_group in modalities:
+                img_modality = modalities[modality_group].pop("image", None)
+                if img_modality is not None:
+                    found_img = True
+                    modalities[modality_group]["rgb"] = img_modality
+
+        if found_img:
+            # Also need to map encoder kwargs correctly
+            old_encoder_cfg = obs_cfg.pop("encoder")
+
+            # Create new encoder entry for RGB
+            rgb_encoder_cfg = {
+                "core_class": "VisualCore",
+                "core_kwargs": {
+                    "backbone_kwargs": dict(),
+                    "pool_kwargs": dict(),
+                },
+                "obs_randomizer_class": None,
+                "obs_randomizer_kwargs": dict(),
+            }
+
+            if "visual_feature_dimension" in old_encoder_cfg:
+                rgb_encoder_cfg["core_kwargs"]["feature_dimension"] = old_encoder_cfg["visual_feature_dimension"]
+
+            if "visual_core" in old_encoder_cfg:
+                rgb_encoder_cfg["core_kwargs"]["backbone_class"] = old_encoder_cfg["visual_core"]
+
+            for kwarg in ("pretrained", "input_coord_conv"):
+                if "visual_core_kwargs" in old_encoder_cfg and kwarg in old_encoder_cfg["visual_core_kwargs"]:
+                    rgb_encoder_cfg["core_kwargs"]["backbone_kwargs"][kwarg] = old_encoder_cfg["visual_core_kwargs"][kwarg]
+
+            # Optionally add pooling info too
+            if old_encoder_cfg.get("use_spatial_softmax", True):
+                rgb_encoder_cfg["core_kwargs"]["pool_class"] = "SpatialSoftmax"
+
+            for kwarg in ("num_kp", "learnable_temperature", "temperature", "noise_std"):
+                if "spatial_softmax_kwargs" in old_encoder_cfg and kwarg in old_encoder_cfg["spatial_softmax_kwargs"]:
+                    rgb_encoder_cfg["core_kwargs"]["pool_kwargs"][kwarg] = old_encoder_cfg["spatial_softmax_kwargs"][kwarg]
+
+            # Update obs randomizer as well
+            for kwarg in ("obs_randomizer_class", "obs_randomizer_kwargs"):
+                if kwarg in old_encoder_cfg:
+                    rgb_encoder_cfg[kwarg] = old_encoder_cfg[kwarg]
+
+            # Store rgb config
+            obs_cfg["encoder"] = {"rgb": rgb_encoder_cfg}
+
+            # Also add defaults for low dim
+            obs_cfg["encoder"]["low_dim"] = {
+                "core_class": None,
+                "core_kwargs": {
+                    "backbone_kwargs": dict(),
+                    "pool_kwargs": dict(),
+                },
+                "obs_randomizer_class": None,
+                "obs_randomizer_kwargs": dict(),
+            }
+
+
 def config_from_checkpoint(algo_name=None, ckpt_path=None, ckpt_dict=None, verbose=False):
     """
     Helper function to restore config from a checkpoint file or loaded model dictionary.
@@ -221,13 +328,15 @@ def config_from_checkpoint(algo_name=None, ckpt_path=None, ckpt_dict=None, verbo
     if algo_name is None:
         algo_name, _ = algo_name_from_checkpoint(ckpt_dict=ckpt_dict)
 
+    # restore config from loaded model dictionary
+    config_dict = json.loads(ckpt_dict['config'])
+    update_config(cfg=config_dict)
+
     if verbose:
         print("============= Loaded Config =============")
-        print(ckpt_dict['config'])
+        print(json.dumps(config_dict, indent=4))
 
-    # restore config from loaded model dictionary
-    config_json = ckpt_dict['config']
-    config = config_factory(algo_name, dic=json.loads(config_json))
+    config = config_factory(algo_name, dic=config_dict)
 
     # lock config to prevent further modifications and ensure missing keys raise errors
     config.lock()
@@ -263,11 +372,10 @@ def policy_from_checkpoint(device=None, ckpt_path=None, ckpt_dict=None, verbose=
     algo_name, _ = algo_name_from_checkpoint(ckpt_dict=ckpt_dict)
     config, _ = config_from_checkpoint(algo_name=algo_name, ckpt_dict=ckpt_dict, verbose=verbose)
 
-    # read config to set up metadata for observation types (e.g. detecting image observations)
+    # read config to set up metadata for observation modalities (e.g. detecting rgb observations)
     ObsUtils.initialize_obs_utils_with_config(config)
 
-    # env meta from model dict to get info needed to create model
-    env_meta = ckpt_dict["env_metadata"]
+    # shape meta from model dict to get info needed to create model
     shape_meta = ckpt_dict["shape_metadata"]
 
     # maybe restore observation normalization stats
@@ -286,7 +394,7 @@ def policy_from_checkpoint(device=None, ckpt_path=None, ckpt_dict=None, verbose=
     model = algo_factory(
         algo_name,
         config,
-        modality_shapes=shape_meta["all_shapes"],
+        obs_key_shapes=shape_meta["all_shapes"],
         ac_dim=shape_meta["ac_dim"],
         device=device,
     )
@@ -334,6 +442,8 @@ def env_from_checkpoint(ckpt_path=None, ckpt_dict=None, env_name=None, render=Fa
         render_offscreen=render_offscreen,
         use_image_obs=shape_meta["use_images"],
     )
+    config, _ = config_from_checkpoint(algo_name=ckpt_dict["algo_name"], ckpt_dict=ckpt_dict, verbose=False)
+    env = EnvUtils.wrap_env_from_config(env, config=config) # apply environment warpper, if applicable
     if verbose:
         print("============= Loaded Environment =============")
         print(env)
@@ -368,7 +478,7 @@ def url_is_alive(url):
         return False
 
 
-def download_url(url, download_dir):
+def download_url(url, download_dir, check_overwrite=True):
     """
     First checks that @url is reachable, then downloads the file
     at that url into the directory specified by @download_dir.
@@ -380,6 +490,8 @@ def download_url(url, download_dir):
     Args:
         url (str): url string
         download_dir (str): path to directory where file should be downloaded
+        check_overwrite (bool): if True, will sanity check the download fpath to make sure a file of that name
+            doesn't already exist there
     """
 
     # check if url is reachable. We need the sleep to make sure server doesn't reject subsequent requests
@@ -389,6 +501,12 @@ def download_url(url, download_dir):
     # infer filename from url link
     fname = url.split("/")[-1]
     file_to_write = os.path.join(download_dir, fname)
+
+    # If we're checking overwrite and the path already exists,
+    # we ask the user to verify that they want to overwrite the file
+    if check_overwrite and os.path.exists(file_to_write):
+        user_response = input(f"Warning: file {file_to_write} already exists. Overwrite? y/n\n")
+        assert user_response.lower() in {"yes", "y"}, f"Did not receive confirmation. Aborting download."
 
     with DownloadProgressBar(unit='B', unit_scale=True,
                              miniters=1, desc=fname) as t:
